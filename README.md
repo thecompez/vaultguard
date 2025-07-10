@@ -6,6 +6,45 @@ Secure Wallet Storage and Recovery Tool
 
 VaultGuard is a C++26 application for securely storing and recovering cryptocurrency wallets (private keys and seed phrases) on an encrypted USB drive. It leverages libsodium for strong cryptography, simulates a blockchain-like structure for redundancy, and supports cross-platform USB management.
 
+```mermaid
+graph TD
+    A[Start VaultGuard] --> B[Show Welcome Screen]
+    B --> C{Is USB with VaultGuard Data Detected?}
+    C -->|Yes| D[Enter Password]
+    C -->|No| E[Prepare USB Menu]
+    D --> F{Password Correct?}
+    F -->|Yes| G[Main Menu]
+    F -->|No| H[Password Incorrect, Try Again]
+    H --> D
+    G --> I{User Choice}
+    I -->|1: Store Wallet| J[Enter Wallet Details: ID, Name, Currency, Key, Seed<br>Or read from file]
+    J --> K[Encrypt Data with Password<br>Argon2 derives key, XChaCha20-Poly1305 encrypts]
+    K --> L[Store in 3 Sectors: vault_sectors.dat<br>Sectors 1000, 1100, 1200; includes salt, nonce, ciphertext]
+    L --> M[Save Backup: vault_key.dat]
+    M --> N[Save Wallet Info: vault_index.dat]
+    N --> O[Save Wallet: wallet_<ID>.dat]
+    O --> G
+    I -->|2: Recover Wallet| P[Show Wallets from vault_index.dat]
+    P --> Q[Select Wallet]
+    Q --> R[Decrypt from vault_sectors.dat or vault_key.dat<br>Password recreates key, decrypts data]
+    R --> S[Save to decrypted_wallet_<ID>.txt]
+    S --> G
+    I -->|3: Change USB| T[Reset USB Config]
+    T --> E
+    I -->|4: Exit| U[End]
+    E --> V{Choose Option}
+    V -->|1: Format USB| W[Enter USB Name & Confirm Format]
+    W --> X[Generate or Enter Password]
+    X --> Y[Format USB to APFS & Store Key<br>Saves to vault_sectors.dat, vault_key.dat]
+    Y --> G
+    V -->|2: Use Existing USB| Z[Enter Mount Path & Password]
+    Z --> AA{Password Correct?}
+    AA -->|Yes| G
+    AA -->|No| AB[Try Again]
+    AB --> Z
+    V -->|3: Cancel| U
+```
+
 ### Key Features
 - **Strong Encryption**: Uses Argon2 for key derivation and XChaCha20-Poly1305 for encryption.
 - **Redundant Storage**: Stores keys in multiple sectors with a blockchain-like approach.
