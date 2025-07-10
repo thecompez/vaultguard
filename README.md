@@ -96,6 +96,16 @@ Follow C++ best practices and include tests where possible.
 ## License
 MIT License. See [LICENSE](LICENSE) for details.
 
+## ⚠️ Security Notice
+
+VaultGuard is currently an **alpha version** and a proof-of-concept. While it uses strong cryptographic methods (Argon2 and XChaCha20-Poly1305 via libsodium), it is still under active development and **not yet production-ready**. Potential risks include:
+
+- **Data Loss**: Forgetting the password will render stored data unrecoverable, as no backdoor or recovery mechanism exists.
+- **Hardware Failure**: If the USB drive fails and no backups are made, data may be lost despite redundancy features.
+- **Untested Edge Cases**: The software has not been thoroughly tested in all scenarios, which could lead to unexpected behavior.
+
+Use VaultGuard **at your own risk** in a secure, offline environment (e.g., Tails OS) for testing purposes only. Always maintain secure backups of your passwords and data. We are actively working to improve stability, security, and add features like Geny token support in future releases.
+
 ## Notes
 - Ensure `libsodium` is installed or let CMake download it automatically.
 - For Windows, set `CMAKE_TOOLCHAIN_FILE` if using vcpkg.
