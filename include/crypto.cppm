@@ -10,13 +10,15 @@ import <stdexcept>;
 import <span>;
 
 export namespace vaultguard::crypto {
-void initialize() {
+void initialize()
+{
     if (sodium_init() < 0) {
         throw std::runtime_error("Failed to initialize libsodium");
     }
 }
 
-std::vector<unsigned char> derive_key(const std::string& password, const std::vector<unsigned char>& salt) {
+std::vector<unsigned char> derive_key(const std::string& password, const std::vector<unsigned char>& salt)
+{
     std::vector<unsigned char> key(crypto_aead_xchacha20poly1305_ietf_KEYBYTES);
     if (crypto_pwhash(
             key.data(), key.size(),
@@ -30,7 +32,8 @@ std::vector<unsigned char> derive_key(const std::string& password, const std::ve
     return key;
 }
 
-std::vector<unsigned char> encrypt(const std::string& data, const std::vector<unsigned char>& key) {
+std::vector<unsigned char> encrypt(const std::string& data, const std::vector<unsigned char>& key)
+{
     std::vector<unsigned char> nonce(crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
     randombytes_buf(nonce.data(), nonce.size());
 
@@ -51,16 +54,21 @@ std::vector<unsigned char> encrypt(const std::string& data, const std::vector<un
     return result;
 }
 
-std::string decrypt(const std::vector<unsigned char>& encrypted, const std::vector<unsigned char>& key) {
-    if (encrypted.size() < crypto_aead_xchacha20poly1305_ietf_NPUBBYTES) {
-        throw std::runtime_error("Invalid encrypted data");
+std::string decrypt(const std::vector<unsigned char>& encrypted, const std::vector<unsigned char>& key)
+{
+    if (encrypted.size() < crypto_aead_xchacha20poly1305_ietf_NPUBBYTES +
+                               crypto_aead_xchacha20poly1305_ietf_ABYTES) {
+        throw std::runtime_error("Invalid encrypted data size");
     }
 
-    std::span<const unsigned char> nonce(encrypted.data(), crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
-    std::span<const unsigned char> ciphertext(encrypted.data() + crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
-                                             encrypted.size() - crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+    std::span<const unsigned char> nonce(encrypted.data(),
+                                         crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
+    std::span<const unsigned char> ciphertext(
+        encrypted.data() + crypto_aead_xchacha20poly1305_ietf_NPUBBYTES,
+        encrypted.size() - crypto_aead_xchacha20poly1305_ietf_NPUBBYTES);
 
-    std::vector<unsigned char> decrypted(ciphertext.size() - crypto_aead_xchacha20poly1305_ietf_ABYTES);
+    std::vector<unsigned char> decrypted(ciphertext.size() -
+                                         crypto_aead_xchacha20poly1305_ietf_ABYTES);
     unsigned long long decrypted_len;
 
     if (crypto_aead_xchacha20poly1305_ietf_decrypt(
@@ -75,14 +83,16 @@ std::string decrypt(const std::vector<unsigned char>& encrypted, const std::vect
     return std::string(decrypted.begin(), decrypted.begin() + decrypted_len);
 }
 
-std::vector<unsigned char> generate_salt() {
+std::vector<unsigned char> generate_salt()
+{
     std::vector<unsigned char> salt(crypto_pwhash_SALTBYTES);
     randombytes_buf(salt.data(), salt.size());
     return salt;
 }
 
-void secure_zero(void* data, size_t size) {
+void secure_zero(void* data, size_t size)
+{
     sodium_memzero(data, size);
 }
 
-}
+} // namespace vaultguard::crypto
