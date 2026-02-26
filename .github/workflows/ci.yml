@@ -21,12 +21,17 @@ jobs:
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
           SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
+          EXTRA_CXX_LIB=""
+          if [[ -f "${LIBCXX_DIR}/libc++experimental.a" || -f "${LIBCXX_DIR}/libc++experimental.dylib" ]]; then
+            EXTRA_CXX_LIB="-lc++experimental"
+          fi
           echo "CC=${LLVM_PREFIX}/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=${LLVM_PREFIX}/bin/clang++" >> "$GITHUB_ENV"
           echo "SDKROOT=${SDKROOT}" >> "$GITHUB_ENV"
           echo "CFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
-          echo "CXXFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
-          echo "LDFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
+          echo "CXXFLAGS=-isysroot ${SDKROOT} -stdlib=libc++ -fexperimental-library" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-isysroot ${SDKROOT} -L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR} ${EXTRA_CXX_LIB}" >> "$GITHUB_ENV"
           echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
 
       - name: Configure project
