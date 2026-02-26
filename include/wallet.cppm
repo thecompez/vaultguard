@@ -1,9 +1,4 @@
-export module wallet;
-
-import crypto;
-import block;
-import file;
-import utils;
+module;
 
 #include <print>
 #include <format>
@@ -11,6 +6,8 @@ import utils;
 #include <vector>
 #include <utility>
 #include <cctype>
+#include <ctime>
+#include <array>
 #include <span>
 #include <fstream>
 #include <sstream>
@@ -19,21 +16,30 @@ import utils;
 #include <filesystem>
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
+#include <cstdio>
+#include <cstring>
+#include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
-#include <sys/ioctl.h>
-#include <sys/disk.h>
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <iomanip>
+#include <system_error>
 
 #ifdef __unix__
 #include <termios.h>
-#include <unistd.h>
 #elif defined(_WIN32)
 #include <windows.h>
 #endif
+
+export module wallet;
+
+import crypto;
+import block;
+import file;
+import utils;
 
 using namespace vaultguard::block;
 
@@ -46,13 +52,97 @@ const std::string COLOR_CYAN = "\033[1;36m";
 const std::string COLOR_RESET = "\033[0m";
 
 // Software metadata
-const std::string VERSION = "1.0.0";
+const std::string VERSION = "1.1.0";
 const std::string AUTHOR = "Genyleap";
-const std::string COMPILE_DATE = "Jul 10 2025";  // Updated to current date
-const std::string COMPILE_TIME = "12:00:00";
+constexpr size_t SECTOR_SIZE = 512;
+constexpr size_t HEADER_SIZE = 8;
+constexpr size_t PREV_HASH_SIZE = 32;
+constexpr size_t KEY_LENGTH_OFFSET = HEADER_SIZE + PREV_HASH_SIZE; // 40
+constexpr size_t KEY_DATA_OFFSET = KEY_LENGTH_OFFSET + sizeof(uint32_t); // 44
+constexpr size_t NEXT_SECTOR_SIZE = sizeof(uint64_t); // 8
+constexpr size_t CHECKSUM_SIZE = sizeof(uint32_t); // 4
+constexpr size_t CHECKSUM_OFFSET = SECTOR_SIZE - CHECKSUM_SIZE; // 508
+constexpr size_t MAX_KEY_DATA_LENGTH = CHECKSUM_OFFSET - KEY_DATA_OFFSET - NEXT_SECTOR_SIZE; // 456
+
+void secure_zero_string(std::string& value) {
+    if (!value.empty()) {
+        crypto::secure_zero(value.data(), value.size());
+        value.clear();
+    }
+}
+
+void trim_trailing_newlines(std::string& value) {
+    const size_t pos = value.find_last_not_of("\n\r");
+    if (pos == std::string::npos) {
+        value.clear();
+        return;
+    }
+    value.erase(pos + 1);
+}
+
+bool is_valid_drive_name(const std::string& drive_name) {
+    static const std::regex allowed_pattern(R"(^[A-Za-z0-9._-]{1,32}$)");
+    return std::regex_match(drive_name, allowed_pattern);
+}
+
+bool is_valid_wallet_id(const std::string& wallet_id) {
+    static const std::regex allowed_pattern(R"(^[A-Za-z0-9_-]{1,64}$)");
+    return std::regex_match(wallet_id, allowed_pattern);
+}
+
+bool is_safe_wallet_data_file(const std::string& file_name) {
+    static const std::regex allowed_pattern(R"(^wallet_[A-Za-z0-9_-]{1,64}\.dat$)");
+    return std::regex_match(file_name, allowed_pattern);
+}
+
+bool constant_time_equal(const std::string& left, const std::string& right) {
+    if (left.size() != right.size()) {
+        return false;
+    }
+    if (left.empty()) {
+        return true;
+    }
+    return sodium_memcmp(left.data(), right.data(), left.size()) == 0;
+}
+
+bool is_valid_device_path(const std::string& device_path) {
+#ifdef __APPLE__
+    static const std::regex allowed_pattern(R"(^/dev/disk[0-9]+$)");
+    return std::regex_match(device_path, allowed_pattern);
+#elif defined(__linux__)
+    static const std::regex allowed_pattern(R"(^/dev/(sd[a-z]|nvme[0-9]+n[0-9]+)$)");
+    return std::regex_match(device_path, allowed_pattern);
+#elif defined(_WIN32)
+    static const std::regex allowed_pattern(R"(^\\\\\.\\PhysicalDrive[0-9]+$)");
+    return std::regex_match(device_path, allowed_pattern);
+#else
+    return false;
+#endif
+}
+
+std::string shell_quote(const std::string& input) {
+    std::string quoted;
+    quoted.reserve(input.size() + 2);
+    quoted.push_back('\'');
+    for (char c : input) {
+        if (c == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted.push_back(c);
+        }
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
 
 // Write block to file-based "sector"
 bool write_block_to_sector(const std::string& file_path, uint64_t sector, const VaultBlock& block) {
+    if (block.key_data.size() > MAX_KEY_DATA_LENGTH) {
+        std::println(stderr, "{}Error: key_data is too large for sector layout ({} > {}).{}",
+                     COLOR_RED, block.key_data.size(), MAX_KEY_DATA_LENGTH, COLOR_RESET);
+        return false;
+    }
+
     std::ofstream out(file_path, std::ios::binary | std::ios::in | std::ios::out);
     if (!out) {
         // Create file if it doesn't exist
@@ -71,30 +161,43 @@ bool write_block_to_sector(const std::string& file_path, uint64_t sector, const 
         std::println(stderr, "{}Error: Cannot open file {} for writing (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
         return false;
     }
-    out.seekp(sector * 512);
+    out.seekp(static_cast<std::streamoff>(sector * SECTOR_SIZE));
     if (!out) {
         std::println(stderr, "{}Error: Cannot seek to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
         out.close();
         return false;
     }
-    std::vector<unsigned char> buffer(512);
+
+    const uint32_t key_data_length = static_cast<uint32_t>(block.key_data.size());
+    const size_t next_sector_offset = KEY_DATA_OFFSET + key_data_length;
+    if (next_sector_offset + NEXT_SECTOR_SIZE > CHECKSUM_OFFSET) {
+        std::println(stderr, "{}Error: Invalid block layout for sector {} (payload overrun).{}", COLOR_RED, sector, COLOR_RESET);
+        out.close();
+        return false;
+    }
+
+    std::array<unsigned char, SECTOR_SIZE> buffer {};
     std::memcpy(buffer.data(), block.header, 8);
     std::memcpy(buffer.data() + 8, block.prev_hash, 32);
-    std::memcpy(buffer.data() + 40, &block.key_data_length, 4);
-    std::memcpy(buffer.data() + 44, block.key_data.data(), block.key_data.size());
-    std::memcpy(buffer.data() + 44 + block.key_data.size(), &block.next_sector, 8);
-    std::memset(buffer.data() + 52 + block.key_data.size(), 0, 512 - (52 + block.key_data.size()) - 4); // Padding
-    uint32_t checksum = utils::crc32(buffer.data(), 512 - 4);
-    std::memcpy(buffer.data() + 508, &checksum, 4);
-    utils::debug_buffer("Writing buffer to sector " + std::to_string(sector), buffer.data(), 512);
-    out.write(reinterpret_cast<const char*>(buffer.data()), 512);
+    std::memcpy(buffer.data() + KEY_LENGTH_OFFSET, &key_data_length, sizeof(key_data_length));
+    if (key_data_length > 0) {
+        std::memcpy(buffer.data() + KEY_DATA_OFFSET, block.key_data.data(), key_data_length);
+    }
+    std::memcpy(buffer.data() + next_sector_offset, &block.next_sector, NEXT_SECTOR_SIZE);
+
+    uint32_t checksum = utils::crc32(buffer.data(), CHECKSUM_OFFSET);
+    std::memcpy(buffer.data() + CHECKSUM_OFFSET, &checksum, CHECKSUM_SIZE);
+
+    out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(SECTOR_SIZE));
     if (!out) {
         std::println(stderr, "{}Error: Failed to write block to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
         out.close();
         return false;
     }
     out.close();
-    std::println(stderr, "{}Debug: Successfully wrote block to sector {} in file {}.{}", COLOR_CYAN, sector, file_path, COLOR_RESET);
+    if (utils::is_debug_enabled()) {
+        std::println(stderr, "{}Debug: Successfully wrote block to sector {} in file {}.{}", COLOR_CYAN, sector, file_path, COLOR_RESET);
+    }
     return true;
 }
 
@@ -106,39 +209,58 @@ bool read_block_from_sector(const std::string& file_path, uint64_t sector, Vault
         std::println(stderr, "{}Error: Cannot open file {} for reading (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
         return false;
     }
-    in.seekg(sector * 512);
+    in.seekg(static_cast<std::streamoff>(sector * SECTOR_SIZE));
     if (!in) {
         std::println(stderr, "{}Error: Cannot seek to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
         in.close();
         return false;
     }
-    std::vector<unsigned char> buffer(512);
-    in.read(reinterpret_cast<char*>(buffer.data()), 512);
-    if (in.gcount() != 512) {
-        std::println(stderr, "{}Error: Failed to read 512 bytes from sector {} in file {} (read {} bytes, errno: {}).{}", COLOR_RED, sector, file_path, in.gcount(), errno, COLOR_RESET);
+    std::array<unsigned char, SECTOR_SIZE> buffer {};
+    in.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(SECTOR_SIZE));
+    if (in.gcount() != static_cast<std::streamsize>(SECTOR_SIZE)) {
+        std::println(stderr, "{}Error: Failed to read {} bytes from sector {} in file {} (read {} bytes, errno: {}).{}",
+                     COLOR_RED, SECTOR_SIZE, sector, file_path, in.gcount(), errno, COLOR_RESET);
         in.close();
         return false;
     }
     in.close();
-    utils::debug_buffer("Read buffer from sector " + std::to_string(sector), buffer.data(), 512);
+
     if (std::strncmp(reinterpret_cast<char*>(buffer.data()), "VAULTGRD", 8) != 0) {
         std::println(stderr, "{}Error: Invalid header in sector {} of file {}. Expected 'VAULTGRD'.{}", COLOR_RED, sector, file_path, COLOR_RESET);
         return false;
     }
+
     uint32_t checksum;
-    std::memcpy(&checksum, buffer.data() + 508, 4);
-    if (checksum != utils::crc32(buffer.data(), 512 - 4)) {
+    std::memcpy(&checksum, buffer.data() + CHECKSUM_OFFSET, CHECKSUM_SIZE);
+    if (checksum != utils::crc32(buffer.data(), CHECKSUM_OFFSET)) {
         std::println(stderr, "{}Error: Checksum mismatch for sector {} in file {}.{}", COLOR_RED, sector, file_path, COLOR_RESET);
         return false;
     }
+
     std::memcpy(block.header, buffer.data(), 8);
     std::memcpy(block.prev_hash, buffer.data() + 8, 32);
-    std::memcpy(&block.key_data_length, buffer.data() + 40, 4);
-    block.key_data.resize(block.key_data_length);
-    std::memcpy(block.key_data.data(), buffer.data() + 44, block.key_data_length);
-    std::memcpy(&block.next_sector, buffer.data() + 44 + block.key_data_length, 8);
+
+    uint32_t key_data_length = 0;
+    std::memcpy(&key_data_length, buffer.data() + KEY_LENGTH_OFFSET, sizeof(key_data_length));
+    if (key_data_length > MAX_KEY_DATA_LENGTH) {
+        std::println(stderr, "{}Error: Invalid key_data_length {} in sector {} (max allowed {}).{}",
+                     COLOR_RED, key_data_length, sector, MAX_KEY_DATA_LENGTH, COLOR_RESET);
+        return false;
+    }
+
+    const size_t next_sector_offset = KEY_DATA_OFFSET + key_data_length;
+    if (next_sector_offset + NEXT_SECTOR_SIZE > CHECKSUM_OFFSET) {
+        std::println(stderr, "{}Error: Corrupted block layout in sector {}.{}", COLOR_RED, sector, COLOR_RESET);
+        return false;
+    }
+
+    block.key_data_length = key_data_length;
+    block.key_data.resize(key_data_length);
+    if (key_data_length > 0) {
+        std::memcpy(block.key_data.data(), buffer.data() + KEY_DATA_OFFSET, key_data_length);
+    }
+    std::memcpy(&block.next_sector, buffer.data() + next_sector_offset, NEXT_SECTOR_SIZE);
     block.checksum = checksum;
-    std::println(stderr, "{}Debug: Recovered key_data size: {} bytes for sector {}.{}", COLOR_CYAN, block.key_data_length, sector, COLOR_RESET);
     return true;
 }
 
@@ -146,59 +268,58 @@ bool read_block_from_sector(const std::string& file_path, uint64_t sector, Vault
 
 // Store key in blockchain
 bool store_key_in_blockchain(const std::string& device_path, const std::string& key, const std::string& password, const std::string& output_path) {
-    std::println(stderr, "{}Debug: Storing key with password (length: {}, content: '{}').{}", COLOR_CYAN, password.length(), password, COLOR_RESET);
-    std::println(stderr, "{}Debug: Using corrected store_key_in_blockchain with unique nonces.{}", COLOR_CYAN, COLOR_RESET);
+    (void)device_path;
     const int NUM_COPIES = 3;
     const uint64_t START_SECTOR = 1000;
     std::vector<uint64_t> sectors = {START_SECTOR, START_SECTOR + 100, START_SECTOR + 200};
     std::string sector_file = output_path + "/vault_sectors.dat";
     unsigned char prev_hash[32] = {0};
-    // Generate salt for key derivation with Argon2
+
+    // Generate salt for key derivation with Argon2.
     auto salt = crypto::generate_salt();
     auto key_vec = crypto::derive_key(password, salt);
     unsigned char derived_key[crypto_secretbox_KEYBYTES];
     std::copy(key_vec.begin(), key_vec.end(), derived_key);
-    utils::debug_buffer("Derived key for encryption", derived_key, crypto_secretbox_KEYBYTES);
+    crypto::secure_zero(key_vec.data(), key_vec.size());
     bool success = false;
 
     for (int i = 0; i < NUM_COPIES; ++i) {
-        // Generate unique nonce for each sector
         unsigned char nonce[crypto_secretbox_NONCEBYTES];
         randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
-        utils::debug_buffer("Generated nonce for sector " + std::to_string(sectors[i]), nonce, crypto_secretbox_NONCEBYTES);
 
-        // Encrypt key for this sector
         std::vector<unsigned char> ciphertext(key.size() + crypto_secretbox_MACBYTES);
         int ret = crypto_secretbox_easy(ciphertext.data(), reinterpret_cast<const unsigned char*>(key.data()), key.size(), nonce, derived_key);
         if (ret != 0) {
             std::println(stderr, "{}Error: Failed to encrypt key for sector {} (crypto_secretbox_easy returned {}).{}", COLOR_RED, sectors[i], ret, COLOR_RESET);
             continue;
         }
-        utils::debug_buffer("Encrypted ciphertext for sector " + std::to_string(sectors[i]), ciphertext.data(), ciphertext.size());
 
-        // Combine salt + nonce + ciphertext
         std::vector<unsigned char> key_data(salt.size() + crypto_secretbox_NONCEBYTES + ciphertext.size());
         std::memcpy(key_data.data(), salt.data(), salt.size());
         std::memcpy(key_data.data() + salt.size(), nonce, crypto_secretbox_NONCEBYTES);
         std::memcpy(key_data.data() + salt.size() + crypto_secretbox_NONCEBYTES, ciphertext.data(), ciphertext.size());
+        if (key_data.size() > MAX_KEY_DATA_LENGTH) {
+            std::println(stderr, "{}Error: Encrypted key payload is too large for a sector ({} > {}).{}",
+                         COLOR_RED, key_data.size(), MAX_KEY_DATA_LENGTH, COLOR_RESET);
+            continue;
+        }
 
-        // Build and write block
         VaultBlock block;
         std::memcpy(block.prev_hash, prev_hash, 32);
         block.key_data = key_data;
-        block.key_data_length = key_data.size();
+        block.key_data_length = static_cast<uint32_t>(key_data.size());
         block.next_sector = (i < NUM_COPIES - 1) ? sectors[i + 1] : 0;
         if (write_block_to_sector(sector_file, sectors[i], block)) {
-            std::vector<unsigned char> buffer(512);
-            std::memcpy(buffer.data(), block.header, 8);
-            std::memcpy(buffer.data() + 8, block.prev_hash, 32);
-            std::memcpy(buffer.data() + 40, &block.key_data_length, 4);
-            std::memcpy(buffer.data() + 44, block.key_data.data(), block.key_data.size());
-            std::memcpy(buffer.data() + 44 + block.key_data.size(), &block.next_sector, 8);
-            std::memset(buffer.data() + 52 + block.key_data.size(), 0, 512 - (52 + block.key_data.size()) - 4); // Padding
-            block.checksum = utils::crc32(buffer.data(), 512 - 4);
-            std::memcpy(buffer.data() + 508, &block.checksum, 4);
-            crypto_hash_sha256(prev_hash, buffer.data(), 512);
+            std::array<unsigned char, SECTOR_SIZE> serialized_block {};
+            std::memcpy(serialized_block.data(), block.header, HEADER_SIZE);
+            std::memcpy(serialized_block.data() + HEADER_SIZE, block.prev_hash, PREV_HASH_SIZE);
+            std::memcpy(serialized_block.data() + KEY_LENGTH_OFFSET, &block.key_data_length, sizeof(block.key_data_length));
+            std::memcpy(serialized_block.data() + KEY_DATA_OFFSET, block.key_data.data(), block.key_data_length);
+            const size_t next_sector_offset = KEY_DATA_OFFSET + block.key_data_length;
+            std::memcpy(serialized_block.data() + next_sector_offset, &block.next_sector, NEXT_SECTOR_SIZE);
+            block.checksum = utils::crc32(serialized_block.data(), CHECKSUM_OFFSET);
+            std::memcpy(serialized_block.data() + CHECKSUM_OFFSET, &block.checksum, CHECKSUM_SIZE);
+            crypto_hash_sha256(prev_hash, serialized_block.data(), SECTOR_SIZE);
             std::println("{}", COLOR_GREEN);
             std::println("Key stored in sector {} of {}. Your keys are locked in an unbreakable digital vault! 🔒", sectors[i], sector_file);
             std::println("{}", COLOR_RESET);
@@ -211,32 +332,43 @@ bool store_key_in_blockchain(const std::string& device_path, const std::string& 
     // Fallback to filesystem if sector storage fails
     if (!success) {
         std::println("{}", COLOR_YELLOW);
-        std::println("Warning: Failed to store key in sectors. Saving to filesystem as fallback.{}", COLOR_RESET);
+        std::println("Warning: Failed to store key in sectors. Saving to filesystem as fallback.");
+        std::println("{}", COLOR_RESET);
         std::string key_file = output_path + "/vault_key.dat";
         std::ofstream out(key_file, std::ios::binary);
         if (!out) {
-            std::println(stderr, "{}Error: Failed to save key to {} (errno: {}). Saving to temporary file /tmp/vault_key.dat.{}", COLOR_RED, key_file, errno, COLOR_RESET);
-            key_file = "/tmp/vault_key.dat";
-            out.open(key_file, std::ios::binary);
-        }
-        if (out) {
-            unsigned char nonce[crypto_secretbox_NONCEBYTES];
-            randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
-            std::vector<unsigned char> ciphertext(key.size() + crypto_secretbox_MACBYTES);
-            if (crypto_secretbox_easy(ciphertext.data(), reinterpret_cast<const unsigned char*>(key.data()), key.size(), nonce, derived_key) == 0) {
-                std::vector<unsigned char> key_data(salt.size() + crypto_secretbox_NONCEBYTES + ciphertext.size());
-                std::memcpy(key_data.data(), salt.data(), salt.size());
-                std::memcpy(key_data.data() + salt.size(), nonce, crypto_secretbox_NONCEBYTES);
-                std::memcpy(key_data.data() + salt.size() + crypto_secretbox_NONCEBYTES, ciphertext.data(), ciphertext.size());
-                out.write(reinterpret_cast<const char*>(key_data.data()), key_data.size());
-                out.close();
-                std::println("{}", COLOR_GREEN);
-                std::println("Key saved to {} as fallback. Please move this file to a secure location!{}", key_file, COLOR_RESET);
-            } else {
-                std::println(stderr, "{}Error: Failed to encrypt key for fallback file {}.{}", COLOR_RED, key_file, COLOR_RESET);
-            }
-        } else {
             std::println(stderr, "{}Error: Failed to save key to {} (errno: {}).{}", COLOR_RED, key_file, errno, COLOR_RESET);
+            crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
+            return false;
+        }
+
+        unsigned char nonce[crypto_secretbox_NONCEBYTES];
+        randombytes_buf(nonce, crypto_secretbox_NONCEBYTES);
+        std::vector<unsigned char> ciphertext(key.size() + crypto_secretbox_MACBYTES);
+        if (crypto_secretbox_easy(ciphertext.data(), reinterpret_cast<const unsigned char*>(key.data()), key.size(), nonce, derived_key) == 0) {
+            std::vector<unsigned char> key_data(salt.size() + crypto_secretbox_NONCEBYTES + ciphertext.size());
+            std::memcpy(key_data.data(), salt.data(), salt.size());
+            std::memcpy(key_data.data() + salt.size(), nonce, crypto_secretbox_NONCEBYTES);
+            std::memcpy(key_data.data() + salt.size() + crypto_secretbox_NONCEBYTES, ciphertext.data(), ciphertext.size());
+            out.write(reinterpret_cast<const char*>(key_data.data()), static_cast<std::streamsize>(key_data.size()));
+            out.close();
+
+            std::error_code permissions_error;
+            std::filesystem::permissions(
+                key_file,
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                std::filesystem::perm_options::replace,
+                permissions_error);
+            if (permissions_error) {
+                std::println(stderr, "{}Warning: Failed to enforce strict permissions on {}: {}.{}",
+                             COLOR_YELLOW, key_file, permissions_error.message(), COLOR_RESET);
+            }
+
+            std::println("{}", COLOR_GREEN);
+            std::println("Key saved to {} as fallback.{}", key_file, COLOR_RESET);
+            success = true;
+        } else {
+            std::println(stderr, "{}Error: Failed to encrypt key for fallback file {}.{}", COLOR_RED, key_file, COLOR_RESET);
         }
     }
 
@@ -246,7 +378,6 @@ bool store_key_in_blockchain(const std::string& device_path, const std::string& 
 
 // Recover key from blockchain
 std::string recover_key_from_blockchain(const std::string& device_path, const std::string& password) {
-    std::println(stderr, "{}Debug: Attempting to recover key with password (length: {}, content: '{}').{}", COLOR_CYAN, password.length(), password, COLOR_RESET);
     const int NUM_COPIES = 3;
     const uint64_t START_SECTOR = 1000;
     std::vector<uint64_t> sectors = {START_SECTOR, START_SECTOR + 100, START_SECTOR + 200};
@@ -269,21 +400,15 @@ std::string recover_key_from_blockchain(const std::string& device_path, const st
             auto key_vec = crypto::derive_key(password, recovered_salt);
             unsigned char derived_key[crypto_secretbox_KEYBYTES];
             std::copy(key_vec.begin(), key_vec.end(), derived_key);
+            crypto::secure_zero(key_vec.data(), key_vec.size());
             unsigned char nonce[crypto_secretbox_NONCEBYTES];
             std::memcpy(nonce, block.key_data.data() + crypto_pwhash_SALTBYTES, crypto_secretbox_NONCEBYTES);
-            utils::debug_buffer("Recovered nonce from sector " + std::to_string(sector), nonce, crypto_secretbox_NONCEBYTES);
             std::vector<unsigned char> ciphertext(block.key_data_length - crypto_pwhash_SALTBYTES - crypto_secretbox_NONCEBYTES);
             std::memcpy(ciphertext.data(), block.key_data.data() + crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES, ciphertext.size());
-            utils::debug_buffer("Recovered ciphertext from sector " + std::to_string(sector), ciphertext.data(), ciphertext.size());
-            utils::debug_buffer("Derived key for decryption", derived_key, crypto_secretbox_KEYBYTES);
             std::vector<unsigned char> decrypted(ciphertext.size() - crypto_secretbox_MACBYTES);
             if (crypto_secretbox_open_easy(decrypted.data(), ciphertext.data(), ciphertext.size(), nonce, derived_key) == 0) {
                 std::string key(reinterpret_cast<char*>(decrypted.data()), decrypted.size());
                 crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
-                std::println("{}", COLOR_GREEN);
-                std::println("Key recovered from sector {} of {}. Your digital vault is unlocked! 🔓", sector, sector_file);
-                std::println("Recovered key: {}", key);
-                std::println("{}", COLOR_RESET);
                 return key;
             } else {
                 std::println(stderr, "{}Error: Failed to decrypt key from sector {} in {}. Incorrect password or corrupted data.{}", COLOR_RED, sector, sector_file, COLOR_RESET);
@@ -297,7 +422,6 @@ std::string recover_key_from_blockchain(const std::string& device_path, const st
 
 // Fallback: Recover key from filesystem
 std::string recover_key_from_filesystem(const std::string& output_path, const std::string& password) {
-    std::println(stderr, "{}Debug: Attempting to recover key from filesystem with password (length: {}, content: {}).{}", COLOR_CYAN, password.length(), password, COLOR_RESET);
     std::string key_file = output_path + "/vault_key.dat";
     std::ifstream in(key_file, std::ios::binary);
     if (!in) {
@@ -314,20 +438,15 @@ std::string recover_key_from_filesystem(const std::string& output_path, const st
     auto key_vec = crypto::derive_key(password, recovered_salt);
     unsigned char derived_key[crypto_secretbox_KEYBYTES];
     std::copy(key_vec.begin(), key_vec.end(), derived_key);
+    crypto::secure_zero(key_vec.data(), key_vec.size());
     unsigned char nonce[crypto_secretbox_NONCEBYTES];
     std::memcpy(nonce, key_data.data() + crypto_pwhash_SALTBYTES, crypto_secretbox_NONCEBYTES);
-    utils::debug_buffer("Recovered nonce from fallback", nonce, crypto_secretbox_NONCEBYTES);
     std::vector<unsigned char> ciphertext(key_data.size() - crypto_pwhash_SALTBYTES - crypto_secretbox_NONCEBYTES);
     std::memcpy(ciphertext.data(), key_data.data() + crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES, ciphertext.size());
-    utils::debug_buffer("Recovered ciphertext from fallback", ciphertext.data(), ciphertext.size());
-    utils::debug_buffer("Derived key for fallback decryption", derived_key, crypto_secretbox_KEYBYTES);
     std::vector<unsigned char> decrypted(ciphertext.size() - crypto_secretbox_MACBYTES);
     if (crypto_secretbox_open_easy(decrypted.data(), ciphertext.data(), ciphertext.size(), nonce, derived_key) == 0) {
         std::string key(reinterpret_cast<char*>(decrypted.data()), decrypted.size());
         crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
-        std::println("{}", COLOR_GREEN);
-        std::println("Key recovered from filesystem ({}). Your digital vault is unlocked! 🔓", key_file);
-        std::println("{}", COLOR_RESET);
         return key;
     }
     crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
@@ -342,7 +461,6 @@ void display_banner() {
     std::println("VaultGuard v{}", VERSION);
     std::println("Secure Wallet Storage and Recovery");
     std::println("Author: {}", AUTHOR);
-    std::println("Compiled: {} at {}", COMPILE_DATE, COMPILE_TIME);
     std::println("Description: Securely store and recover cryptocurrency wallets (private keys and seed phrases) on an encrypted USB drive.");
     std::println("----------------------------------------{}", COLOR_RESET);
     std::println("{}", COLOR_YELLOW);
@@ -353,32 +471,24 @@ void display_banner() {
 
 // Check if a directory is writable
 bool is_writable(const std::filesystem::path& dir) {
-    std::filesystem::path test_file = dir / ".test_write";
+    const std::string nonce = std::format("{}_{}", std::time(nullptr), static_cast<long long>(::getpid()));
+    std::filesystem::path test_file = dir / (".vaultguard_write_test_" + nonce);
     std::ofstream test(test_file);
     if (!test) {
         return false;
     }
     test.close();
-    std::filesystem::remove(test_file);
+    std::error_code remove_error;
+    std::filesystem::remove(test_file, remove_error);
     return true;
-}
-
-// Escape password for shell commands
-std::string escape_shell_password(const std::string& password) {
-    std::string escaped;
-    for (char c : password) {
-        if (c == '\'' || c == '"' || c == '\\' || c == '$' || c == '`' || c == '!' || c == '#' || c == '&' || c == '|' || c == ';') {
-            escaped += '\\';
-        }
-        escaped += c;
-    }
-    return escaped;
 }
 
 // Get secure input with hidden characters
 std::string get_secure_input(const std::string& prompt) {
-    std::println("{}{}: ", COLOR_CYAN, prompt);  // Use println for automatic newline
-    std::fflush(stdout);
+    if (!prompt.empty()) {
+        std::print("{}{}: {}", COLOR_CYAN, prompt, COLOR_RESET);
+        std::fflush(stdout);
+    }
 
 #ifdef __unix__
     termios oldt, newt;
@@ -395,7 +505,7 @@ std::string get_secure_input(const std::string& prompt) {
 
     std::string input;
     std::getline(std::cin, input);
-    input.erase(input.find_last_not_of("\n\r") + 1);  // Remove extra newlines
+    trim_trailing_newlines(input);
 
 #ifdef __unix__
     tcsetattr(STDIN_FILENO, TCSANOW, &oldt);
@@ -465,8 +575,10 @@ std::vector<UsbDevice> list_usb_drives() {
     }
 
     if (devices.empty()) {
-        std::println(stderr, "{}Debug: Raw output from diskutil list external:\n{}", COLOR_RED, output);
-        std::println(stderr, "{}", COLOR_RESET);
+        if (utils::is_debug_enabled()) {
+            std::println(stderr, "{}Debug: Raw output from diskutil list external:\n{}", COLOR_RED, output);
+            std::println(stderr, "{}", COLOR_RESET);
+        }
     }
 
     return devices;
@@ -492,6 +604,16 @@ std::string get_apfs_volume_path(const std::string& device_path) {
 
 // Format USB drive to APFS (non-encrypted)
 bool format_usb_drive(const std::string& device_path, const std::string& drive_name, const std::string& disk_name, const std::string& password, std::string& output_path) {
+    if (!is_valid_device_path(device_path)) {
+        std::println(stderr, "{}ERROR: Invalid device path format: {}.{}", COLOR_RED, device_path, COLOR_RESET);
+        return false;
+    }
+    if (!is_valid_drive_name(drive_name)) {
+        std::println(stderr, "{}ERROR: Invalid drive name '{}'. Use only letters, digits, dot, dash, underscore (max 32).{}",
+                     COLOR_RED, drive_name, COLOR_RESET);
+        return false;
+    }
+
     if (is_system_disk(device_path)) {
         std::println(stderr, "{}ERROR: Cannot format system disk: {}", COLOR_RED, device_path);
         std::println(stderr, "{}", COLOR_RESET);
@@ -527,16 +649,14 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
     }
 
     // Unmount disk
-    std::string command = std::format("diskutil unmountDisk {}", device_path);
-    std::println(stderr, "{}Debug: Executing command: '{}'.{}", COLOR_CYAN, command, COLOR_RESET);
+    std::string command = std::format("diskutil unmountDisk {}", shell_quote(device_path));
     if (std::system(command.c_str()) != 0) {
         std::println(stderr, "{}Failed to unmount disk: {}.{}", COLOR_RED, device_path, COLOR_RESET);
         return false;
     }
 
     // Erase and format disk to APFS
-    command = std::format("diskutil eraseDisk APFS {} {}", drive_name, device_path);
-    std::println(stderr, "{}Debug: Executing command: '{}'.{}", COLOR_CYAN, command, COLOR_RESET);
+    command = std::format("diskutil eraseDisk APFS {} {}", shell_quote(drive_name), shell_quote(device_path));
     if (std::system(command.c_str()) != 0) {
         std::println(stderr, "{}Failed to erase disk: {}.{}", COLOR_RED, device_path, COLOR_RESET);
         return false;
@@ -558,12 +678,14 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
         full_list_output += buffer;
     }
     pclose(pipe);
-    std::println(stderr, "{}Debug: Full diskutil list output:\n{}", COLOR_CYAN, full_list_output, COLOR_RESET);
 
     // Find APFS container ID
     std::string device_id = device_path.substr(device_path.find_last_of('/') + 1); // Extract disk6 from /dev/disk6
+    if (!std::regex_match(device_id, std::regex(R"(^disk[0-9]+$)"))) {
+        std::println(stderr, "{}Error: Unexpected device id {}.{}", COLOR_RED, device_id, COLOR_RESET);
+        return false;
+    }
     command = std::format("diskutil list | grep 'Apple_APFS Container' | grep {}s2 | awk '{{print $4}}'", device_id);
-    std::println(stderr, "{}Debug: Executing container command: '{}'.{}", COLOR_CYAN, command, COLOR_RESET);
     pipe = popen(command.c_str(), "r");
     if (!pipe) {
         std::println(stderr, "{}Failed to list APFS containers for {}.{}", COLOR_RED, device_path, COLOR_RESET);
@@ -574,8 +696,7 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
         result += buffer;
     }
     pclose(pipe);
-    result.erase(result.find_last_not_of("\n\r") + 1);
-    std::println(stderr, "{}Debug: diskutil list output for APFS container: '{}'.{}", COLOR_CYAN, result, COLOR_RESET);
+    trim_trailing_newlines(result);
     std::string container_id = result.empty() ? "" : "/dev/" + result;
     if (container_id.empty()) {
         std::println(stderr, "{}Error: Failed to find APFS container device. Full diskutil list output:\n{}", COLOR_RED, full_list_output, COLOR_RESET);
@@ -583,7 +704,7 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
     }
 
     // Find mount path
-    command = std::format("diskutil apfs list {} | grep 'Mount Point' | awk '{{print $4}}' | head -n 1", container_id);
+    command = std::format("diskutil apfs list {} | grep 'Mount Point' | awk '{{print $4}}' | head -n 1", shell_quote(container_id));
     pipe = popen(command.c_str(), "r");
     if (!pipe) {
         std::println(stderr, "{}Error: Failed to find mount point for {}.{}", COLOR_RED, container_id, COLOR_RESET);
@@ -592,7 +713,7 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
     result.clear();
     if (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         result = buffer;
-        result.erase(result.find_last_not_of("\n\r") + 1);
+        trim_trailing_newlines(result);
     }
     pclose(pipe);
     output_path = result.empty() ? "/Volumes/" + drive_name : result;
@@ -605,7 +726,10 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
     std::println("{}", COLOR_GREEN);
     std::println("USB drive formatted successfully as {} (APFS). Your digital vault is ready! 🔒", drive_name);
     std::println("{}", COLOR_RESET);
-    store_key_in_blockchain(device_path, password, password, output_path);
+    if (!store_key_in_blockchain(device_path, password, password, output_path)) {
+        std::println(stderr, "{}Error: Failed to initialize vault key metadata on formatted drive.{}", COLOR_RED, COLOR_RESET);
+        return false;
+    }
     return true;
 }
 
@@ -622,7 +746,12 @@ struct WalletMetadata {
 void save_wallet(const std::string& wallet_id, const std::string& private_key, const std::string& seed_phrase,
                  const std::string& name, const std::string& currency, const std::string& output_path,
                  const std::string& password, const std::string& device_path) {
-    std::println(stderr, "{}Debug: Saving wallet with password (length: {}, content: {}).{}", COLOR_CYAN, password.length(), password, COLOR_RESET);
+    (void)device_path;
+    if (!is_valid_wallet_id(wallet_id)) {
+        std::println(stderr, "{}Error: Invalid wallet ID '{}'. Use letters, numbers, underscore, dash (max 64).{}",
+                     COLOR_RED, wallet_id, COLOR_RESET);
+        return;
+    }
     std::filesystem::path output_dir(output_path);
     if (!std::filesystem::exists(output_dir)) {
         std::println(stderr, "{}Error: Output directory does not exist: {}. Ensure the USB drive is mounted (e.g., /Volumes/VAULT) and the path is correct.{}", COLOR_RED, output_path, COLOR_RESET);
@@ -641,12 +770,11 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
 
     auto salt = crypto::generate_salt();
     auto key = crypto::derive_key(password, salt);
-    utils::debug_buffer("Derived key for wallet encryption", key.data(), key.size());
     auto encrypted = crypto::encrypt(wallet_str, key);
     std::string wallet_file = output_path + "/wallet_" + wallet_id + ".dat";
     file::save(wallet_file, salt, encrypted);
     crypto::secure_zero(key.data(), key.size());
-    crypto::secure_zero(&wallet_str[0], wallet_str.size());
+    secure_zero_string(wallet_str);
 
     std::string index_file = output_path + "/vault_index.dat";
     std::vector<WalletMetadata> index_data;
@@ -654,7 +782,6 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
         try {
             auto [loaded_salt, loaded_encrypted] = file::load(index_file);
             auto loaded_key = crypto::derive_key(password, loaded_salt);
-            utils::debug_buffer("Derived key for index decryption", loaded_key.data(), loaded_key.size());
             std::string decrypted_index = crypto::decrypt(loaded_encrypted, loaded_key);
             std::istringstream iss(decrypted_index);
             std::string line;
@@ -677,7 +804,7 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
                 }
             }
             crypto::secure_zero(loaded_key.data(), loaded_key.size());
-            crypto::secure_zero(&decrypted_index[0], decrypted_index.size());
+            secure_zero_string(decrypted_index);
         } catch (const std::exception& e) {
             std::println(stderr, "{}Error: Failed to load or decrypt index file: {}. Ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
             return;
@@ -700,25 +827,26 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
     std::string index_str = index_ss.str();
     auto index_salt = crypto::generate_salt();
     auto index_key = crypto::derive_key(password, index_salt);
-    utils::debug_buffer("Derived key for index encryption", index_key.data(), index_key.size());
     auto index_encrypted = crypto::encrypt(index_str, index_key);
     file::save(index_file, index_salt, index_encrypted);
     crypto::secure_zero(index_key.data(), index_key.size());
-    crypto::secure_zero(&index_str[0], index_str.size());
+    secure_zero_string(index_str);
 
     std::println("{}", COLOR_GREEN);
     std::println("Wallet {} saved to {}. Your digital vault is secure! 🔒", wallet_id, wallet_file);
     std::println("{}", COLOR_RESET);
-    if (std::filesystem::exists(wallet_file) && std::filesystem::exists(index_file)) {
-        std::println("{}Debug: Wallet file and index file successfully created.{}", COLOR_CYAN, COLOR_RESET);
-    } else {
-        std::println(stderr, "{}Debug: Failed to verify wallet file or index file creation.{}", COLOR_RED, COLOR_RESET);
+    if (utils::is_debug_enabled()) {
+        if (std::filesystem::exists(wallet_file) && std::filesystem::exists(index_file)) {
+            std::println("{}Debug: Wallet file and index file successfully created.{}", COLOR_CYAN, COLOR_RESET);
+        } else {
+            std::println(stderr, "{}Debug: Failed to verify wallet file or index file creation.{}", COLOR_RED, COLOR_RESET);
+        }
     }
 }
 
 // Recover stored wallets
 void recover_wallet(const std::string& output_path, const std::string& password, const std::string& device_path) {
-    std::println(stderr, "{}Debug: Recovering wallet with password (length: {}, content: {}).{}", COLOR_CYAN, password.length(), password, COLOR_RESET);
+    (void)device_path;
     std::string recovered_password = recover_key_from_blockchain(output_path, password);
     if (recovered_password.empty()) {
         std::println("{}", COLOR_YELLOW);
@@ -729,10 +857,12 @@ void recover_wallet(const std::string& output_path, const std::string& password,
         std::println(stderr, "{}Error: Failed to recover key from blockchain or filesystem. Please ensure the correct password is used and files exist.{}", COLOR_RED, COLOR_RESET);
         return;
     }
-    if (recovered_password != password) {
-        std::println(stderr, "{}Error: Recovered password does not match provided password (recovered: {}).{}", COLOR_RED, recovered_password, COLOR_RESET);
+    if (!constant_time_equal(recovered_password, password)) {
+        std::println(stderr, "{}Error: Recovered password does not match provided password.{}", COLOR_RED, COLOR_RESET);
+        secure_zero_string(recovered_password);
         return;
     }
+    secure_zero_string(recovered_password);
 
     std::string index_file = output_path + "/vault_index.dat";
     if (!std::filesystem::exists(index_file)) {
@@ -744,7 +874,6 @@ void recover_wallet(const std::string& output_path, const std::string& password,
     try {
         auto [loaded_salt, loaded_encrypted] = file::load(index_file);
         auto loaded_key = crypto::derive_key(password, loaded_salt);
-        utils::debug_buffer("Derived key for index decryption", loaded_key.data(), loaded_key.size());
         std::string decrypted_index = crypto::decrypt(loaded_encrypted, loaded_key);
         std::istringstream iss(decrypted_index);
         std::string line;
@@ -767,7 +896,7 @@ void recover_wallet(const std::string& output_path, const std::string& password,
             }
         }
         crypto::secure_zero(loaded_key.data(), loaded_key.size());
-        crypto::secure_zero(&decrypted_index[0], decrypted_index.size());
+        secure_zero_string(decrypted_index);
     } catch (const std::exception& e) {
         std::println(stderr, "{}Error: Failed to decrypt or parse index file: {}. Please ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
         return;
@@ -803,11 +932,23 @@ void recover_wallet(const std::string& output_path, const std::string& password,
         return;
     }
 
-    std::string wallet_file = output_path + "/" + wallets[wallet_index - 1].file;
+    const auto& selected_wallet = wallets[wallet_index - 1];
+    if (!is_valid_wallet_id(selected_wallet.wallet_id) || !is_safe_wallet_data_file(selected_wallet.file)) {
+        std::println(stderr, "{}Error: Wallet metadata for selected entry is invalid or unsafe.{}", COLOR_RED, COLOR_RESET);
+        return;
+    }
+
+    std::string expected_file = "wallet_" + selected_wallet.wallet_id + ".dat";
+    if (selected_wallet.file != expected_file) {
+        std::println(stderr, "{}Error: Wallet index integrity check failed for wallet {}.{}", COLOR_RED, selected_wallet.wallet_id, COLOR_RESET);
+        return;
+    }
+
+    std::filesystem::path wallet_file_path = std::filesystem::path(output_path) / expected_file;
+    std::string wallet_file = wallet_file_path.string();
     try {
         auto [wallet_salt, wallet_encrypted] = file::load(wallet_file);
         auto wallet_key = crypto::derive_key(password, wallet_salt);
-        utils::debug_buffer("Derived key for wallet decryption", wallet_key.data(), wallet_key.size());
         std::string decrypted_wallet = crypto::decrypt(wallet_encrypted, wallet_key);
         std::string wallet_id, private_key, seed_phrase;
         std::istringstream wallet_ss(decrypted_wallet);
@@ -822,25 +963,75 @@ void recover_wallet(const std::string& output_path, const std::string& password,
             }
         }
         crypto::secure_zero(wallet_key.data(), wallet_key.size());
-        crypto::secure_zero(&decrypted_wallet[0], decrypted_wallet.size());
+        secure_zero_string(decrypted_wallet);
 
-        std::string output_file = output_path + "/decrypted_wallet_" + wallets[wallet_index - 1].wallet_id + ".txt";
-        std::ofstream out_file(output_file);
-        if (!out_file) {
-            std::println(stderr, "{}Error: Failed to open file for writing: {}.{}", COLOR_RED, output_file, COLOR_RESET);
+        std::println("Recovery output mode:");
+        std::println("[1] Display once in terminal (no file)");
+        std::println("[2] Export plaintext file (higher risk)");
+        std::println("[3] Cancel");
+        std::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
+        std::string output_choice;
+        std::getline(std::cin, output_choice);
+
+        if (output_choice == "1") {
+            std::println("{}", COLOR_YELLOW);
+            std::println("Wallet ID: {}", wallet_id);
+            std::println("Private Key: {}", private_key);
+            std::println("Seed Phrase: {}", seed_phrase);
+            std::println("Displayed once. No plaintext file was created.");
+            std::println("{}", COLOR_RESET);
+        } else if (output_choice == "2") {
+            std::string output_file = output_path + "/decrypted_wallet_" + selected_wallet.wallet_id + ".txt";
+            std::ofstream out_file(output_file, std::ios::out | std::ios::trunc);
+            if (!out_file) {
+                std::println(stderr, "{}Error: Failed to open file for writing: {}.{}", COLOR_RED, output_file, COLOR_RESET);
+                secure_zero_string(wallet_id);
+                secure_zero_string(private_key);
+                secure_zero_string(seed_phrase);
+                return;
+            }
+            out_file << std::format("Wallet ID: {}\n", wallet_id);
+            out_file << std::format("Private Key: {}\n", private_key);
+            out_file << std::format("Seed Phrase: {}\n", seed_phrase);
+            out_file.flush();
+            if (!out_file) {
+                out_file.close();
+                std::println(stderr, "{}Error: Failed while writing wallet data to {}.{}", COLOR_RED, output_file, COLOR_RESET);
+                secure_zero_string(wallet_id);
+                secure_zero_string(private_key);
+                secure_zero_string(seed_phrase);
+                return;
+            }
+            out_file.close();
+
+            std::error_code permissions_error;
+            std::filesystem::permissions(
+                output_file,
+                std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                std::filesystem::perm_options::replace,
+                permissions_error);
+            if (permissions_error) {
+                std::println(stderr, "{}Warning: Failed to enforce strict permissions on {}: {}.{}",
+                             COLOR_YELLOW, output_file, permissions_error.message(), COLOR_RESET);
+            }
+
+            std::println("{}", COLOR_GREEN);
+            std::println("Decrypted data for {} saved to {}.", wallet_id, output_file);
+            std::println("Treat this plaintext file as highly sensitive and delete it as soon as possible.");
+            std::println("{}", COLOR_RESET);
+        } else {
+            std::println("{}", COLOR_YELLOW);
+            std::println("Recovery output cancelled.");
+            std::println("{}", COLOR_RESET);
+            secure_zero_string(wallet_id);
+            secure_zero_string(private_key);
+            secure_zero_string(seed_phrase);
             return;
         }
-        out_file << std::format("Wallet ID: {}\n", wallet_id);
-        out_file << std::format("Private Key: {}\n", private_key);
-        out_file << std::format("Seed Phrase: {}\n", seed_phrase);
-        out_file.close();
-        std::println("{}", COLOR_GREEN);
-        std::println("Decrypted data for {} saved to {}. Your digital vault is unlocked! 🔓", wallet_id, output_file);
-        std::println("{}", COLOR_RESET);
 
-        crypto::secure_zero(&wallet_id[0], wallet_id.size());
-        crypto::secure_zero(&private_key[0], private_key.size());
-        crypto::secure_zero(&seed_phrase[0], seed_phrase.size());
+        secure_zero_string(wallet_id);
+        secure_zero_string(private_key);
+        secure_zero_string(seed_phrase);
     } catch (const std::exception& e) {
         std::println(stderr, "{}Error: Failed to decrypt or parse wallet file: {}. Please ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
         return;
@@ -909,10 +1100,9 @@ bool find_existing_usb(std::string& output_path, std::string& password, std::str
             try {
                 auto [loaded_salt, loaded_encrypted] = file::load(index_file.string());
                 auto loaded_key = crypto::derive_key(password, loaded_salt);
-                utils::debug_buffer("Derived key for index decryption in find_existing_usb", loaded_key.data(), loaded_key.size());
                 std::string decrypted_index = crypto::decrypt(loaded_encrypted, loaded_key);
                 crypto::secure_zero(loaded_key.data(), loaded_key.size());
-                crypto::secure_zero(&decrypted_index[0], decrypted_index.size());
+                secure_zero_string(decrypted_index);
                 device_path = output_path; // Use output_path for file-based sectors
                 return true;
             } catch (const std::exception& e) {
@@ -993,7 +1183,8 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
     if (choice == "1") {
         password = generate_secure_password();
         std::println("{}", COLOR_GREEN);
-        std::println("Generated password: {}.", password);
+        std::println("Generated password (copy exactly):");
+        std::println("{}", password);
         std::println("Please save this password securely (e.g., in a password manager or physical safe)!{}", COLOR_RESET);
         std::print("{}If you prefer to use your own password, enter it now (at least 16 characters, including uppercase, lowercase, digits, and special characters), or press Enter to use the generated one (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
         std::string user_password = get_secure_input("");
@@ -1006,10 +1197,10 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
                 std::println("{}", COLOR_GREEN);
                 std::println("Custom password accepted. Please save it securely!{}", COLOR_RESET);
             } else {
-                std::println("{}Warning: Provided password is not strong enough. Using generated password instead: {}.{}", COLOR_YELLOW, password, COLOR_RESET);
+                std::println("{}Warning: Provided password is not strong enough. Using generated password instead: {}{}", COLOR_YELLOW, password, COLOR_RESET);
             }
         }
-        crypto::secure_zero(&user_password[0], user_password.size());
+        secure_zero_string(user_password);
 
         std::print("{}Select a USB drive by number (1-{}) or type 'cancel' to return: {}", COLOR_CYAN, devices.size(), COLOR_RESET);
         std::string device_choice;
@@ -1111,10 +1302,12 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
             std::println(stderr, "{}Error: Failed to recover key from blockchain or filesystem. Please ensure the correct password is used and files exist.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
-        if (recovered_password != password) {
+        if (!constant_time_equal(recovered_password, password)) {
+            secure_zero_string(recovered_password);
             std::println(stderr, "{}Error: Invalid password for {}.{}", COLOR_RED, output_path, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
+        secure_zero_string(recovered_password);
     } else {
         std::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
         return select_or_format_usb(output_path, password, device_path);
@@ -1154,7 +1347,7 @@ void run() {
                 std::println(stderr, "{}Error: USB drive at {} is no longer accessible. Please reconfigure USB drive.{}", COLOR_RED, output_path, COLOR_RESET);
                 usb_ready = false;
                 output_path.clear();
-                password.clear();
+                secure_zero_string(password);
                 device_path.clear();
                 continue;
             }
@@ -1164,12 +1357,12 @@ void run() {
             std::println("[2] Recover stored wallets");
             std::println("[3] Change USB drive");
             std::println("[4] Exit");
-            std::println("{}Select an option (1-4): ", COLOR_CYAN); // newline خودکار
+            std::print("{}Select an option (1-4): {}", COLOR_CYAN, COLOR_RESET);
             std::fflush(stdout);
             std::string menu_choice;
             std::getline(std::cin, menu_choice);
-            menu_choice.erase(menu_choice.find_last_not_of("\n\r") + 1);
-            std::println(""); // newline بعد از ورودی
+            trim_trailing_newlines(menu_choice);
+            std::println("");
             if (menu_choice.empty()) {
                 std::println("{}Invalid option. Please select a number between 1 and 4.{}", COLOR_RED, COLOR_RESET);
                 continue;
@@ -1184,11 +1377,11 @@ void run() {
                 std::println("[1] Enter wallet manually");
                 std::println("[2] Read from file");
                 std::println("[3] Cancel and return to main menu");
-                std::println("{}Select an option (1-3): ", COLOR_CYAN);
+                std::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
                 std::fflush(stdout);
                 std::string wallet_choice;
                 std::getline(std::cin, wallet_choice);
-                wallet_choice.erase(wallet_choice.find_last_not_of("\n\r") + 1);
+                trim_trailing_newlines(wallet_choice);
                 std::println("");
                 if (wallet_choice == "3" || wallet_choice == "cancel") {
                     continue;
@@ -1206,7 +1399,11 @@ void run() {
                     std::println("{}Wallet ID cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
-                std::string name = get_secure_input("Enter wallet name (e.g., My BTC Wallet) or type 'cancel' to return");
+                if (!is_valid_wallet_id(wallet_id)) {
+                    std::println("{}Invalid wallet ID format. Use letters, numbers, '_' or '-' only (max 64).{}", COLOR_RED, COLOR_RESET);
+                    continue;
+                }
+                std::string name = get_secure_input("Enter wallet name (e.g., My BTC Wallet, GENY Wallet) or type 'cancel' to return");
                 if (name == "cancel") {
                     continue;
                 }
@@ -1214,7 +1411,7 @@ void run() {
                     std::println("{}Wallet name cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
-                std::string currency = get_secure_input("Enter currency (e.g., BTC, ETH) or type 'cancel' to return");
+                std::string currency = get_secure_input("Enter currency (e.g., BTC, ETH, GENY) or type 'cancel' to return");
                 if (currency == "cancel") {
                     continue;
                 }
@@ -1261,10 +1458,10 @@ void run() {
                         seed_phrase = file_content.substr(pos + 1);
                         if (private_key.empty() || seed_phrase.empty()) {
                             std::println(stderr, "{}Error: Private key or seed phrase is empty in file{}", COLOR_RED, COLOR_RESET);
-                            crypto::secure_zero(&file_content[0], file_content.size());
+                            secure_zero_string(file_content);
                             continue;
                         }
-                        crypto::secure_zero(&file_content[0], file_content.size());
+                        secure_zero_string(file_content);
                     } catch (const std::exception& e) {
                         std::println(stderr, "{}Error: Failed to read file: {}", COLOR_RED, e.what());
                         std::println(stderr, "{}", COLOR_RESET);
@@ -1276,14 +1473,14 @@ void run() {
                 }
 
                 save_wallet(wallet_id, private_key, seed_phrase, name, currency, output_path, password, device_path);
-                crypto::secure_zero(&private_key[0], private_key.size());
-                crypto::secure_zero(&seed_phrase[0], seed_phrase.size());
+                secure_zero_string(private_key);
+                secure_zero_string(seed_phrase);
             } else if (menu_choice == "2") {
                 recover_wallet(output_path, password, device_path);
             } else if (menu_choice == "3") {
                 usb_ready = false;
                 output_path.clear();
-                password.clear();
+                secure_zero_string(password);
                 device_path.clear();
             } else {
                 std::println("{}Invalid option. Please select a number between 1 and 4.{}", COLOR_RED, COLOR_RESET);
@@ -1292,11 +1489,11 @@ void run() {
             std::println("\nVaultGuard Menu (No USB drive configured):");
             std::println("[1] Prepare USB drive");
             std::println("[2] Exit");
-            std::println("{}Select an option (1-2): ", COLOR_CYAN);
+            std::print("{}Select an option (1-2): {}", COLOR_CYAN, COLOR_RESET);
             std::fflush(stdout);
             std::string menu_choice;
             std::getline(std::cin, menu_choice);
-            menu_choice.erase(menu_choice.find_last_not_of("\n\r") + 1);
+            trim_trailing_newlines(menu_choice);
             std::println("");
             if (menu_choice.empty()) {
                 std::println("{}Invalid option. Please select a number between 1 and 2.{}", COLOR_RED, COLOR_RESET);
@@ -1317,7 +1514,7 @@ void run() {
         }
     }
 
-    crypto::secure_zero(&password[0], password.size());
+    secure_zero_string(password);
 }
 
 } // namespace vaultguard::wallet

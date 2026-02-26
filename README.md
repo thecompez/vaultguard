@@ -27,7 +27,7 @@ graph TD
     I -->|2: Recover Wallet| P[Show Wallets from vault_index.dat]
     P --> Q[Select Wallet]
     Q --> R[Decrypt from vault_sectors.dat or vault_key.dat<br>Password recreates key, decrypts data]
-    R --> S[Save to decrypted_wallet_<ID>.txt]
+    R --> S[Display once in terminal<br>or export decrypted_wallet_<ID>.txt]
     S --> G
     I -->|3: Change USB| T[Reset USB Config]
     T --> E
@@ -51,6 +51,8 @@ graph TD
 - **Filesystem Fallback**: Saves keys to a file if sector storage fails.
 - **Cross-Platform**: Supports macOS, Linux, and Windows with USB detection and formatting.
 - **Secure Input**: Validates user inputs and provides secure password generation.
+- **Safer Recovery Output**: Defaults to one-time terminal display and requires explicit choice for plaintext export files.
+- **Automated Verification**: Includes CI, unit tests, and integration tests (`ctest`) for release gating.
 
 ## Dependencies
 - **C++26 Compiler**: Clang, GCC, or MSVC with module support.
@@ -84,7 +86,7 @@ graph TD
    ```
 3. Configure with CMake:
    ```bash
-   cmake -G Ninja ..
+   cmake -G Ninja -DBUILD_TESTING=ON ..
    ```
    For Windows with vcpkg:
    ```bash
@@ -94,7 +96,11 @@ graph TD
    ```bash
    ninja
    ```
-5. Install (optional):
+5. Run tests:
+   ```bash
+   ctest --output-on-failure
+   ```
+6. Install (optional):
    ```bash
    cmake --install .
    ```
@@ -107,13 +113,19 @@ This produces two executables: `vaultguard` (main app) and `recover_key` (recove
   ./vaultguard
   ```
   Follow the menu to prepare a USB drive, store, or recover wallets.
+  Wallet IDs must use only letters, numbers, `_` or `-` (max 64 chars).
 - **Recovery Tool**:
   ```bash
-  ./recover_key <mount_path> <password>
+  ./recover_key <mount_path>
+  ```
+  The tool prompts for the password securely (hidden input).  
+  Use `--show-key` only when you explicitly need plaintext output:
+  ```bash
+  ./recover_key <mount_path> --show-key
   ```
   Example:
   ```bash
-  ./recover_key /Volumes/VAULT my_secure_password
+  ./recover_key /Volumes/VAULT
   ```
 
 **Warning**: Run VaultGuard offline on a trusted system (e.g., Tails OS) with a connected USB drive to ensure security.
@@ -137,15 +149,16 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 ## ⚠️ Security Notice
 
-VaultGuard is currently an **alpha version** and a proof-of-concept. While it uses strong cryptographic methods (Argon2 and XChaCha20-Poly1305 via libsodium), it is still under active development and **not yet production-ready**. Potential risks include:
+VaultGuard is now a **production-candidate build** with hardened input validation, safer recovery defaults, and automated test/CI gates. External security review is still recommended before high-value deployments. Potential operational risks include:
 
 - **Data Loss**: Forgetting the password will render stored data unrecoverable, as no backdoor or recovery mechanism exists.
 - **Hardware Failure**: If the USB drive fails and no backups are made, data may be lost despite redundancy features.
-- **Untested Edge Cases**: The software has not been thoroughly tested in all scenarios, which could lead to unexpected behavior.
+- **Operational Misuse**: Exporting plaintext recovered keys or running on an untrusted/online host can leak secrets.
 
-Use VaultGuard **at your own risk** in a secure, offline environment (e.g., Tails OS) for testing purposes only. Always maintain secure backups of your passwords and data. We are actively working to improve stability, security, and add features like Geny token support in future releases.
+Use VaultGuard on a secure, offline environment (e.g., Tails OS) and always maintain secure backups of passwords and key material.
 
 ## Notes
 - Ensure `libsodium` is installed or let CMake download it automatically.
 - For Windows, set `CMAKE_TOOLCHAIN_FILE` if using vcpkg.
 - Test thoroughly on a secure, offline system before storing sensitive data.
+- Use the release gate checklist in `RELEASE_CHECKLIST.md` before promoting a build.

@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: macos-14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: brew install cmake ninja llvm libsodium
+
+      - name: Configure LLVM toolchain
+        run: |
+          LLVM_PREFIX="$(brew --prefix llvm)"
+          echo "CC=${LLVM_PREFIX}/bin/clang" >> "$GITHUB_ENV"
+          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> "$GITHUB_ENV"
+          echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
+
+      - name: Configure project
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
+          -DCMAKE_C_COMPILER="${CC}"
+          -DCMAKE_CXX_COMPILER="${CXX}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
