@@ -3,8 +3,7 @@ name: CI
 on:
   push:
     branches: [main, master]
-    tags:
-      - "v*"
+    tags: ["v*"]
   pull_request:
 
 jobs:
@@ -65,73 +64,41 @@ jobs:
           choco install -y ninja
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
 
-      # ✅ Ensure MSVC environment (INCLUDE/LIB/LINK/RC/MT) is set for clang-cl
+      # ✅ Ensure MSVC env is set (INCLUDE/LIB/LINK/RC/MT) for clang-cl
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || 'amd64' }}
 
-      # ✅ Install LLVM/Clang 21.x from official llvm-project releases
-      # Robust: prefers zip; if exe, installs and then searches for clang-cl.exe to locate bin dir.
+      # ✅ Install LLVM/Clang 21.x via winget (reliable on GitHub runners)
       - name: Install LLVM 21.x (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
 
-          $repo = "llvm/llvm-project"
-          $headers = @{ "Accept" = "application/vnd.github+json" }
-          if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
+          # Install latest available (21.x) from winget
+          winget install --id LLVM.LLVM -e --accept-package-agreements --accept-source-agreements
 
-          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=50" -Headers $headers
-          $rel = $releases | Where-Object { $_.tag_name -match '^llvmorg-21\.' } | Select-Object -First 1
-          if (-not $rel) { throw "No llvmorg-21.* release found." }
-
-          $tmp = Join-Path $env:RUNNER_TEMP "llvm21"
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-
-          # Prefer ZIP (no installer quirks), fallback to EXE
-          $assetZip = $rel.assets | Where-Object { $_.name -match 'win64.*\.zip$' } | Select-Object -First 1
-          $assetExe = $rel.assets | Where-Object { $_.name -match 'win64.*\.exe$' } | Select-Object -First 1
-
-          $asset = $assetZip
-          $mode = "zip"
-          if (-not $asset) { $asset = $assetExe; $mode = "exe" }
-          if (-not $asset) { throw "No Windows win64 asset (.zip or .exe) found for $($rel.tag_name)." }
-
-          $dl = Join-Path $tmp $asset.name
-          Write-Host "Downloading: $($asset.browser_download_url)"
-          Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $dl
-
-          $root = Join-Path $tmp "root"
-          New-Item -ItemType Directory -Force -Path $root | Out-Null
-
-          if ($mode -eq "zip") {
-            Expand-Archive -Path $dl -DestinationPath $root -Force
-          } else {
-            # Install to a folder; NSIS requires /D=... as LAST arg and typically unquoted.
-            $installDir = Join-Path $root "LLVM"
-            New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-            Write-Host "Installing LLVM silently..."
-            & $dl /S /D=$installDir
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path $llvmBin)) {
+            # fallback: locate clang-cl if install path differs
+            $clang = Get-Command clang-cl -ErrorAction SilentlyContinue
+            if ($clang) { $llvmBin = Split-Path -Parent $clang.Source }
           }
 
-          # Locate clang-cl.exe and derive bin dir (works for both zip and exe layouts)
-          $clang = Get-ChildItem -Path $root -Recurse -Filter "clang-cl.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if (-not $clang) { throw "clang-cl.exe not found under: $root" }
-
-          $llvmBin = $clang.DirectoryName
+          $clangCl = Join-Path $llvmBin "clang-cl.exe"
           $scanDeps = Join-Path $llvmBin "clang-scan-deps.exe"
+
+          if (-not (Test-Path $clangCl)) { throw "clang-cl.exe not found at: $clangCl" }
           if (-not (Test-Path $scanDeps)) { throw "clang-scan-deps.exe not found at: $scanDeps" }
 
           Add-Content $env:GITHUB_PATH $llvmBin
-          echo "CLANG_CL=$($clang.FullName)" >> $env:GITHUB_ENV
-          echo "CLANG_SCAN_DEPS=$scanDeps" >> $env:GITHUB_ENV
+          "CLANG_CL=$clangCl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "CLANG_SCAN_DEPS=$scanDeps" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          & $clang.FullName --version
+          & $clangCl --version
           & $scanDeps --version
 
       # ---------------- Toolchain (macOS/Linux) ----------------
@@ -180,7 +147,7 @@ jobs:
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
 
-      # ✅ Windows: Ninja + clang-cl + scan-deps for C++ modules scanning
+      # ✅ Windows: Ninja + clang-cl + explicit scan-deps for C++ modules scanning
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
