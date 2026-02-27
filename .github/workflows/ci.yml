@@ -29,20 +29,22 @@ jobs:
             name: windows-arm64
             vcpkg_triplet: arm64-windows
             vs_arch: ARM64
-
           - os: windows-latest
             name: windows-x86
             vcpkg_triplet: x86-windows
             vs_arch: Win32
 
+          # Linux
           - os: ubuntu-24.04
             name: linux-x86
             linux_arch: x86
-
           - os: ubuntu-24.04
             name: linux-x64
           - os: ubuntu-24.04-arm
             name: linux-arm64
+          - os: ubuntu-24.04
+            name: linux-armv7
+            linux_arch: armv7
 
     permissions:
       contents: write
@@ -97,7 +99,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          # Pin CMake version via Chocolatey
           choco install -y cmake --version=$env:CMAKE_VERSION --allow-downgrade
           refreshenv
           cmake --version
@@ -115,20 +116,29 @@ jobs:
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update
 
           if [ "${{ matrix.name }}" = "linux-x86" ]; then
-            # 32-bit toolchain + common 32-bit runtime libs
+            # 32-bit x86 target on x86_64 host
             sudo apt-get install -y zip gcc-multilib g++-multilib libc6-dev-i386 pkg-config
-
-            # libsodium 32-bit dev package (Ubuntu multiarch)
             sudo dpkg --add-architecture i386
             sudo apt-get update
             sudo apt-get install -y libsodium-dev:i386
+
+          elif [ "${{ matrix.name }}" = "linux-armv7" ]; then
+            # ARMv7 (armhf) cross-compile on x86_64 host
+            sudo dpkg --add-architecture armhf
+            sudo apt-get update
+            sudo apt-get install -y zip pkg-config \
+              gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+              libsodium-dev:armhf
+
           else
             sudo apt-get install -y zip libsodium-dev
           fi
 
+          # Host tools (OK to be x86_64 / aarch64 host)
           /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
 
       - name: Install dependencies (Windows)
@@ -136,7 +146,7 @@ jobs:
         shell: pwsh
         run: |
           choco install -y 7zip
-          vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
+          vcpkg install libsodium:${{ matrix.vcpkg_triplet }}
 
       # ✅ Ensure MSVC environment
       - name: MSVC Dev Cmd (Windows)
@@ -153,6 +163,8 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
+          set -euo pipefail
+
           BREW_CMD="brew"
           if [ "${{ runner.os }}" = "Linux" ]; then
             BREW_CMD="/home/linuxbrew/.linuxbrew/bin/brew"
@@ -184,7 +196,7 @@ jobs:
           echo "clang: $(clang++ --version | head -n 1)"
           echo "ninja: $(ninja --version || true)"
           if [ "${{ runner.os }}" = "Linux" ]; then
-            dpkg -l | grep -E 'libsodium-dev|zip' || true
+            dpkg -l | grep -E 'libsodium-dev|zip|arm-linux-gnueabihf|multilib' || true
           fi
 
       - name: Tool versions (Windows)
@@ -193,17 +205,14 @@ jobs:
         run: |
           cmake --version
 
-          # VS / MSVC version (safe, no failing exit codes)
           $vsver = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products * -property installationVersion) 2>$null
           if ($vsver) { Write-Host "Visual Studio: $vsver" }
 
-          # Show where cl.exe is, then print version without failing the step
           $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
           if ($cl) {
             Write-Host "cl.exe: $($cl.Source)"
             cmd /c "cl /Bv" | Out-Host
-            # Some environments still return non-zero for cl commands; don't fail the job
             $global:LASTEXITCODE = 0
           }
 
@@ -225,11 +234,31 @@ jobs:
           -DCMAKE_CXX_COMPILER="${CXX}"
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Linux: build with clang (works), but disable tests for now
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
+          set -euo pipefail
+
+          if [ "${{ matrix.name }}" = "linux-armv7" ]; then
+            # Cross compile (armhf)
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=Release \
+              -DBUILD_TESTING=OFF \
+              -DCMAKE_SYSTEM_NAME=Linux \
+              -DCMAKE_SYSTEM_PROCESSOR=armv7 \
+              -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
+              -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ \
+              -DCMAKE_C_FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=hard" \
+              -DCMAKE_CXX_FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=hard" \
+              -DCMAKE_FIND_ROOT_PATH="/usr/arm-linux-gnueabihf;/usr/lib/arm-linux-gnueabihf;/usr/include" \
+              -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+              -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+              -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+              -DCMAKE_CXX_SCAN_FOR_MODULES=ON
+            exit 0
+          fi
+
           extra=""
           if [ "${{ matrix.name }}" = "linux-x86" ]; then
             extra="-DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DCMAKE_EXE_LINKER_FLAGS=-m32"
@@ -243,7 +272,6 @@ jobs:
             -DCMAKE_CXX_SCAN_FOR_MODULES=ON \
             $extra
 
-      # ✅ Windows: VS generator + MSVC cl.exe
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -300,6 +328,7 @@ jobs:
 
       - name: Package artifacts (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
