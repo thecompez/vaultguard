@@ -20,7 +20,7 @@ jobs:
           - os: macos-latest
             name: macos-x64
 
-          # Windows: use MSVC (cl.exe) via VS generator (best CMake modules support)
+          # Windows: MSVC (cl.exe) via VS generator
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
@@ -40,10 +40,58 @@ jobs:
 
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      CMAKE_VERSION: "4.2.3"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # ---------------------------
+      # CMake (Pinned, same version everywhere)
+      # ---------------------------
+
+      - name: Install CMake ${{ env.CMAKE_VERSION }} (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ver="${CMAKE_VERSION}"
+          os="$(uname -s)"
+          arch="$(uname -m)"
+
+          if [ "$os" = "Darwin" ]; then
+            pkg="cmake-${ver}-macos-universal.tar.gz"
+          else
+            case "$arch" in
+              x86_64)  pkg="cmake-${ver}-linux-x86_64.tar.gz" ;;
+              aarch64) pkg="cmake-${ver}-linux-aarch64.tar.gz" ;;
+              arm64)   pkg="cmake-${ver}-linux-aarch64.tar.gz" ;;
+              *) echo "Unsupported Linux arch: $arch" >&2; exit 1 ;;
+            esac
+          fi
+
+          url="https://github.com/Kitware/CMake/releases/download/v${ver}/${pkg}"
+          echo "Downloading: $url"
+
+          dst="${RUNNER_TEMP}/cmake"
+          rm -rf "$dst"
+          mkdir -p "$dst"
+
+          curl -fsSL "$url" -o "${RUNNER_TEMP}/${pkg}"
+          tar -xzf "${RUNNER_TEMP}/${pkg}" -C "$dst" --strip-components=1
+
+          echo "${dst}/bin" >> "$GITHUB_PATH"
+          cmake --version
+
+      - name: Install CMake ${{ env.CMAKE_VERSION }} (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Pin CMake version via Chocolatey
+          choco install -y cmake --version=$env:CMAKE_VERSION --allow-downgrade
+          refreshenv
+          cmake --version
 
       # ---------------------------
       # Install deps
@@ -51,23 +99,22 @@ jobs:
 
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake ninja llvm libsodium
+        run: |
+          brew install ninja llvm libsodium
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y zip libsodium-dev
-          /home/linuxbrew/.linuxbrew/bin/brew install cmake ninja llvm
+          /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
 
-      # Windows: drop LLVM here (we use MSVC cl.exe)
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y cmake 7zip
+          choco install -y 7zip
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
-          cmake --version
 
       # ✅ Ensure MSVC environment
       - name: MSVC Dev Cmd (Windows)
@@ -104,6 +151,29 @@ jobs:
           fi
 
       # ---------------------------
+      # Print versions (so you can confirm parity)
+      # ---------------------------
+
+      - name: Tool versions (macOS/Linux)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          echo "cmake: $(cmake --version | head -n 1)"
+          echo "clang: $(clang++ --version | head -n 1)"
+          echo "ninja: $(ninja --version || true)"
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            dpkg -l | grep -E 'libsodium-dev|zip' || true
+          fi
+
+      - name: Tool versions (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake --version
+          cl /Bv
+          if (Get-Command 7z -ErrorAction SilentlyContinue) { 7z | Select-String "7-Zip" | Select-Object -First 1 }
+
+      # ---------------------------
       # Configure
       # ---------------------------
 
@@ -129,7 +199,7 @@ jobs:
           -DCMAKE_CXX_COMPILER="${CXX}"
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Windows: use VS generator + MSVC cl.exe (modules support is best here)
+      # ✅ Windows: VS generator + MSVC cl.exe
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
