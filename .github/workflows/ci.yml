@@ -43,7 +43,7 @@ jobs:
           - os: ubuntu-24.04-arm
             name: linux-arm64
 
-          # Linux ARMv7 (armhf) via cross-compile (brew LLVM 21)
+          # Linux ARMv7 (armhf) via cross-compile (brew LLVM)
           - os: ubuntu-24.04
             name: linux-armv7
             linux_arch: armv7
@@ -60,9 +60,8 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------
-      # CMake (Pinned, same version everywhere)
+      # CMake (Pinned)
       # ---------------------------
-
       - name: Install CMake ${{ env.CMAKE_VERSION }} (macOS/Linux)
         if: runner.os != 'Windows'
         shell: bash
@@ -106,11 +105,11 @@ jobs:
           cmake --version
 
       # ---------------------------
-      # Install deps
+      # Dependencies
       # ---------------------------
-
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           brew install ninja llvm libsodium
 
@@ -121,30 +120,30 @@ jobs:
           set -euo pipefail
 
           if [ "${{ matrix.name }}" = "linux-armv7" ]; then
-            # --- IMPORTANT ---
-            # Ubuntu 24.04's default sources try to fetch armhf from security.ubuntu.com (404).
-            # We pin the default Ubuntu sources to amd64 only, then add Ubuntu Ports for armhf.
-            sudo sed -i 's/^Architectures:.*$/Architectures: amd64/; t; /^Types: deb$/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources || true
-
+            # Keep host sources amd64-only and add ports sources for armhf
+            # (avoids security.ubuntu.com armhf 404 on Noble)
             sudo dpkg --add-architecture armhf
 
-            sudo tee /etc/apt/sources.list.d/armhf-ports.sources >/dev/null <<'EOF'
-Types: deb
-URIs: http://ports.ubuntu.com/ubuntu-ports
-Suites: noble noble-updates noble-security noble-backports
-Components: main universe multiverse restricted
-Architectures: armhf
-Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+            sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
+deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main universe multiverse restricted
+deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main universe multiverse restricted
+deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-backports main universe multiverse restricted
+deb [arch=amd64] http://security.ubuntu.com/ubuntu noble-security main universe multiverse restricted
+EOF
+
+            sudo tee /etc/apt/sources.list.d/armhf-ports.list >/dev/null <<'EOF'
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble main universe multiverse restricted
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe multiverse restricted
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-backports main universe multiverse restricted
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main universe multiverse restricted
 EOF
 
             sudo apt-get update
-
-            # armhf sysroot + libs
-            sudo apt-get install -y --no-install-recommends \
-              zip pkg-config \
+            sudo apt-get install -y --no-install-recommends zip pkg-config \
               libc6-dev:armhf linux-libc-dev:armhf \
               libstdc++-13-dev:armhf libgcc-13-dev:armhf \
               libsodium-dev:armhf
+
           else
             sudo apt-get update
 
@@ -167,7 +166,6 @@ EOF
           choco install -y 7zip
           vcpkg install libsodium:${{ matrix.vcpkg_triplet }}
 
-      # ✅ Ensure MSVC environment
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -175,9 +173,8 @@ EOF
           arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || (matrix.name == 'windows-x86' && 'amd64_x86' || 'amd64') }}
 
       # ---------------------------
-      # Toolchain: macOS + Linux (brew llvm)
+      # Toolchain: brew LLVM (macOS + Linux)
       # ---------------------------
-
       - name: Configure LLVM toolchain (macOS and Linux)
         if: runner.os != 'Windows'
         shell: bash
@@ -205,9 +202,8 @@ EOF
           fi
 
       # ---------------------------
-      # Print versions (so you can confirm parity)
+      # Versions
       # ---------------------------
-
       - name: Tool versions (macOS/Linux)
         if: runner.os != 'Windows'
         shell: bash
@@ -216,7 +212,7 @@ EOF
           echo "clang: $(clang++ --version | head -n 1)"
           echo "ninja: $(ninja --version || true)"
           if [ "${{ runner.os }}" = "Linux" ]; then
-            dpkg -l | grep -E 'libsodium-dev|zip|armhf' || true
+            dpkg -l | grep -E 'libsodium-dev|zip|armhf|i386' || true
           fi
 
       - name: Tool versions (Windows)
@@ -224,7 +220,6 @@ EOF
         shell: pwsh
         run: |
           cmake --version
-
           $vsver = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products * -property installationVersion) 2>$null
           if ($vsver) { Write-Host "Visual Studio: $vsver" }
@@ -242,17 +237,17 @@ EOF
       # ---------------------------
       # Configure
       # ---------------------------
-
       - name: Configure project (macOS)
         if: runner.os == 'macOS'
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DBUILD_TESTING=ON
-          -DCMAKE_OSX_SYSROOT="${SDKROOT}"
-          -DCMAKE_C_COMPILER="${CC}"
-          -DCMAKE_CXX_COMPILER="${CXX}"
-          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_OSX_SYSROOT="${SDKROOT}" \
+            -DCMAKE_C_COMPILER="${CC}" \
+            -DCMAKE_CXX_COMPILER="${CXX}" \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
@@ -286,7 +281,6 @@ EOF
               -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
               -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
               -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
-
             exit 0
           fi
 
@@ -308,7 +302,6 @@ EOF
         shell: pwsh
         run: |
           $arch = "${{ matrix.vs_arch }}"
-
           $testing = "ON"
           if ("${{ matrix.name }}" -eq "windows-arm64") { $testing = "OFF" }
 
@@ -323,29 +316,30 @@ EOF
       # ---------------------------
       # Build
       # ---------------------------
-
       - name: Build (Windows)
         if: runner.os == 'Windows'
+        shell: pwsh
         run: cmake --build build --parallel --config Release
 
       - name: Build (macOS/Linux)
         if: runner.os != 'Windows'
+        shell: bash
         run: cmake --build build --parallel --config Release
 
       # ---------------------------
       # Test
       # ---------------------------
-
       - name: Test
         if: runner.os == 'macOS' || (runner.os == 'Windows' && matrix.name == 'windows-x64')
+        shell: bash
         run: ctest --test-dir build --output-on-failure -C Release
 
       # ---------------------------
       # Package
       # ---------------------------
-
       - name: Package artifacts (macOS)
         if: runner.os == 'macOS'
+        shell: bash
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
@@ -359,13 +353,13 @@ EOF
 
       - name: Package artifacts (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
       # ---------------------------
       # Upload + Release
       # ---------------------------
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
