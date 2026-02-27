@@ -1,10 +1,10 @@
 import wallet;
 import crypto;
 
-import <exception>;
-import <iostream>;
-import <print>;
-import <string>;
+#include <exception>
+#include <format>
+#include <iostream>
+#include <string>
 
 namespace {
 void secure_zero_string(std::string& value) {
@@ -17,7 +17,7 @@ void secure_zero_string(std::string& value) {
 
 int main(int argc, char* argv[]) {
     if (argc < 2 || argc > 3) {
-        std::println(stderr, "Usage: {} <mount_path> [--show-key]", argv[0]);
+        std::cerr << std::format("Usage: {} <mount_path> [--show-key]", argv[0]) << '\n';
         return 1;
     }
 
@@ -25,8 +25,8 @@ int main(int argc, char* argv[]) {
     if (argc == 3) {
         const std::string option = argv[2];
         if (option != "--show-key") {
-            std::println(stderr, "Unknown option: {}", option);
-            std::println(stderr, "Usage: {} <mount_path> [--show-key]", argv[0]);
+            std::cerr << std::format("Unknown option: {}", option) << '\n';
+            std::cerr << std::format("Usage: {} <mount_path> [--show-key]", argv[0]) << '\n';
             return 1;
         }
         show_key = true;
@@ -39,7 +39,7 @@ int main(int argc, char* argv[]) {
         std::string password = vaultguard::wallet::get_secure_input("Enter password");
         if (password.empty() || password == "cancel") {
             secure_zero_string(password);
-            std::println(stderr, "Password cannot be empty.");
+            std::cerr << "Password cannot be empty.\n";
             return 1;
         }
 
@@ -49,30 +49,30 @@ int main(int argc, char* argv[]) {
         }
 
         if (recovered_key.empty()) {
-            std::println(stderr, "Failed to recover key. Check mount path, password, and vault files.");
+            std::cerr << "Failed to recover key. Check mount path, password, and vault files.\n";
             secure_zero_string(password);
             return 1;
         }
 
         if (!vaultguard::wallet::constant_time_equal(recovered_key, password)) {
-            std::println(stderr, "Recovered key validation failed.");
+            std::cerr << "Recovered key validation failed.\n";
             secure_zero_string(recovered_key);
             secure_zero_string(password);
             return 1;
         }
 
         if (show_key) {
-            std::println("Recovered key: {}", recovered_key);
+            std::cout << std::format("Recovered key: {}", recovered_key) << '\n';
         } else {
-            std::println("Key recovered successfully.");
-            std::println("Use --show-key if you need to print it.");
+            std::cout << "Key recovered successfully.\n";
+            std::cout << "Use --show-key if you need to print it.\n";
         }
 
         secure_zero_string(recovered_key);
         secure_zero_string(password);
         return 0;
     } catch (const std::exception& e) {
-        std::println(stderr, "Error: {}", e.what());
+        std::cerr << std::format("Error: {}", e.what()) << '\n';
         return 1;
     }
 }
