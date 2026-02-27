@@ -9,19 +9,51 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: macos-14
+    name: Build on ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: macos-arm64
+          - os: macos-13
+            name: macos-x64
+          - os: windows-latest
+            name: windows-x64
+            vcpkg_triplet: x64-windows
+          - os: windows-latest
+            name: windows-arm64
+            vcpkg_triplet: arm64-windows
+            cmake_arch: ARM64
+          - os: ubuntu-24.04
+            name: linux-x64
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+
     permissions:
       contents: write
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
         run: brew install cmake ninja llvm libsodium
 
-      - name: Configure LLVM toolchain
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: vcpkg install libsodium:${{ matrix.vcpkg_triplet }}
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang llvm libsodium-dev zip
+
+      - name: Configure LLVM toolchain (macOS)
+        if: runner.os == 'macOS'
         run: |
           LLVM_PREFIX="$(brew --prefix llvm)"
           SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
@@ -34,7 +66,8 @@ jobs:
           echo "LDFLAGS=-isysroot ${SDKROOT} -L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
           echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
 
-      - name: Configure project
+      - name: Configure project (macOS)
+        if: runner.os == 'macOS'
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
@@ -43,26 +76,60 @@ jobs:
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
 
+      - name: Configure project (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ARCH_FLAG=""
+          if [ "${{ matrix.cmake_arch }}" != "" ]; then
+            ARCH_FLAG="-A ${{ matrix.cmake_arch }}"
+          fi
+          cmake -S . -B build $ARCH_FLAG -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
+
+      - name: Configure project (Linux)
+        if: runner.os == 'Linux'
+        run: >
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+
       - name: Build
-        run: cmake --build build --parallel
+        run: cmake --build build --parallel --config Release
 
       - name: Test
-        run: ctest --test-dir build --output-on-failure
+        if: matrix.cmake_arch != 'ARM64'
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Package artifacts (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
+
+      - name: Package artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp build/Release/vaultguard.exe . || cp build/vaultguard.exe .
+          cp build/Release/recover_key.exe . || cp build/recover_key.exe .
+          7z a ${{ matrix.name }}.zip vaultguard.exe recover_key.exe
+
+      - name: Package artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: vaultguard-macos
-          path: |
-            build/vaultguard
-            build/recover_key
+          name: ${{ matrix.name }}
+          path: ${{ matrix.name }}.zip
 
       - name: Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: |
-            build/vaultguard
-            build/recover_key
+          files: ${{ matrix.name }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
