@@ -17,7 +17,7 @@ jobs:
         include:
           - os: macos-14
             name: macos-arm64
-          - os: macos-13
+          - os: macos-latest
             name: macos-x64
           - os: windows-latest
             name: windows-x64
@@ -50,7 +50,7 @@ jobs:
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang llvm libsodium-dev zip
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build clang libc++-dev libc++abi-dev llvm libsodium-dev zip
 
       - name: Configure LLVM toolchain (macOS)
         if: runner.os == 'macOS'
@@ -84,12 +84,12 @@ jobs:
           if [ "${{ matrix.cmake_arch }}" != "" ]; then
             ARCH_FLAG="-A ${{ matrix.cmake_arch }}"
           fi
-          cmake -S . -B build $ARCH_FLAG -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
+          cmake -S . -B build $ARCH_FLAG -T ClangCL -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }}
 
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
         run: >
-          cmake -S . -B build -G Ninja
+          CXXFLAGS="-stdlib=libc++" cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DBUILD_TESTING=ON
           -DCMAKE_C_COMPILER=clang
