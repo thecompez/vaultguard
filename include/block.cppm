@@ -1,6 +1,9 @@
+module;
+
+#include <cstdint>
+#include <vector>
+
 export module block;
-import <cstdint>;
-import <vector>;
 export namespace vaultguard::block {
     struct VaultBlock {
         char header[8] = {'V', 'A', 'U', 'L', 'T', 'G', 'R', 'D'};

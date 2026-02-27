@@ -1,20 +1,19 @@
 module;
 
 #include <sodium.h>
+#include <vector>
+#include <string>
+#include <fstream>
+#include <stdexcept>
+#include <utility>
+#include <array>
+#include <filesystem>
+#include <system_error>
+#include <cstdint>
+#include <cstring>
+#include <cstddef>
 
 export module file;
-
-import <vector>;
-import <string>;
-import <fstream>;
-import <stdexcept>;
-import <utility>;
-import <array>;
-import <filesystem>;
-import <system_error>;
-import <cstdint>;
-import <cstring>;
-import <cstddef>;
 
 export namespace vaultguard::file {
     constexpr std::array<unsigned char, 8> FILE_MAGIC = {'V', 'G', 'F', 'I', 'L', 'E', '0', '1'};

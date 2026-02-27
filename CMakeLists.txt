@@ -1,16 +1,13 @@
 cmake_minimum_required(VERSION 3.26)
 project(VaultGuard LANGUAGES C CXX)
 
-# -------------------------
-# Language standards
-# -------------------------
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
+# Set C++23 standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 
-# (Optional) If you still want "latest" mode on MSVC:
 if(MSVC)
     add_compile_options(/std:c++latest)
 endif()
@@ -263,21 +260,27 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
         )
     endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
-    target_compile_options(vaultguard PRIVATE
-            /experimental:module
-    )
-    target_compile_options(recover_key PRIVATE
-            /experimental:module
-    )
-    if(BUILD_TESTING)
-        target_compile_options(vaultguard_tests PRIVATE
+        # CMake 3.26 may not recognize C++26 for MSVC (CXX26 dialect),
+        # so force MSVC to use latest standard mode explicitly.
+        target_compile_options(vaultguard PRIVATE
+                /std:c++latest
                 /experimental:module
         )
-        target_compile_options(vaultguard_integration_tests PRIVATE
+        target_compile_options(recover_key PRIVATE
+                /std:c++latest
                 /experimental:module
         )
+        if(BUILD_TESTING)
+            target_compile_options(vaultguard_tests PRIVATE
+                    /std:c++latest
+                    /experimental:module
+            )
+            target_compile_options(vaultguard_integration_tests PRIVATE
+                    /std:c++latest
+                    /experimental:module
+            )
+        endif()
     endif()
-endif()
 
 # Windows-specific settings
 if(WIN32)

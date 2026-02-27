@@ -1,13 +1,12 @@
 module;
 
 #include <sodium.h>
+#include <vector>
+#include <string>
+#include <stdexcept>
+#include <span>
 
 export module crypto;
-
-import <vector>;
-import <string>;
-import <stdexcept>;
-import <span>;
 
 export namespace vaultguard::crypto {
 void initialize()
