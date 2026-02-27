@@ -3,7 +3,8 @@ name: CI
 on:
   push:
     branches: [main, master]
-    tags: ["v*"]
+    tags:
+      - "v*"
   pull_request:
 
 jobs:
@@ -16,19 +17,16 @@ jobs:
         include:
           - os: macos-14
             name: macos-arm64
-          - os: macos-latest
+          - os: macos-13
             name: macos-x64
-
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
             clang_target: x86_64-pc-windows-msvc
-
           - os: windows-latest
             name: windows-arm64
             vcpkg_triplet: arm64-windows
             clang_target: aarch64-pc-windows-msvc
-
           - os: ubuntu-24.04
             name: linux-x64
           - os: ubuntu-24.04-arm
@@ -39,104 +37,174 @@ jobs:
 
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      LLVM_MAJOR: "21"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------- macOS ----------------
-      - name: Install dependencies (macOS)
-        if: runner.os == 'macOS'
-        run: brew install cmake ninja llvm libsodium
+      # ------------------------------------------------------------
+      # LLVM/Clang 21.x on ALL platforms
+      # ------------------------------------------------------------
 
-      # ---------------- Linux ----------------
-      - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update && sudo apt-get install -y libsodium-dev zip
-          /home/linuxbrew/.linuxbrew/bin/brew install cmake ninja llvm
-
-      # ---------------- Windows ----------------
-      - name: Install Ninja + vcpkg deps (Windows)
+      - name: Install LLVM 21.x (Windows via winget)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          winget source update
+
+          # Ensure LLVM is installed/upgraded (winget currently provides 21.x on hosted runners)
+          winget install --id LLVM.LLVM --source winget --accept-package-agreements --accept-source-agreements --silent `
+            || winget upgrade --id LLVM.LLVM --source winget --accept-package-agreements --accept-source-agreements --silent
+
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (-not (Test-Path $llvmBin)) { throw "LLVM bin not found: $llvmBin" }
+
+          Add-Content $env:GITHUB_PATH $llvmBin
+
+          $clang = Join-Path $llvmBin "clang-cl.exe"
+          $scan = Join-Path $llvmBin "clang-scan-deps.exe"
+          if (-not (Test-Path $clang)) { throw "clang-cl.exe not found: $clang" }
+          if (-not (Test-Path $scan))  { throw "clang-scan-deps.exe not found: $scan" }
+
+          echo "CLANG_CL=$clang"           >> $env:GITHUB_ENV
+          echo "CLANG_SCAN_DEPS=$scan"     >> $env:GITHUB_ENV
+
+          & $clang --version
+          & $scan  --version
+
+          $ver = & $clang --version | Select-String -Pattern 'clang version' | ForEach-Object { $_.ToString() }
+          if ($ver -notmatch 'clang version 21\.') { throw "Expected clang 21.x, got: $ver" }
+
+      - name: Install LLVM 21.x (macOS/Linux from llvmorg releases)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          repo="llvm/llvm-project"
+          api="https://api.github.com/repos/${repo}/releases?per_page=50"
+          tag="$(curl -fsSL "$api" | python3 - <<'PY'
+import json,sys,re
+rels=json.load(sys.stdin)
+cand=[r for r in rels if re.match(r"^llvmorg-21\.", r.get("tag_name",""))]
+if not cand:
+  raise SystemExit("No llvmorg-21.* release found")
+print(cand[0]["tag_name"])
+PY
+)"
+          echo "Using $tag"
+
+          uname_s="$(uname -s)"
+          uname_m="$(uname -m)"
+
+          # Match official prebuilt tarball names
+          # macOS:  arm64-apple-darwin | x86_64-apple-darwin
+          # Linux:  aarch64-linux-gnu  | x86_64-linux-gnu (Ubuntu 22.04 build works on 24.04 runners)
+          if [[ "$uname_s" == "Darwin" ]]; then
+            if [[ "$uname_m" == "arm64" ]]; then
+              needle="clang\\+llvm-.*-arm64-apple-darwin.*\\.tar\\.xz$"
+            else
+              needle="clang\\+llvm-.*-x86_64-apple-darwin.*\\.tar\\.xz$"
+            fi
+          else
+            if [[ "$uname_m" == "aarch64" || "$uname_m" == "arm64" ]]; then
+              needle="clang\\+llvm-.*-aarch64-linux-gnu.*\\.tar\\.xz$"
+            else
+              needle="clang\\+llvm-.*-x86_64-linux-gnu.*\\.tar\\.xz$"
+            fi
+          fi
+
+          dl="$(curl -fsSL "https://api.github.com/repos/${repo}/releases/tags/${tag}" \
+            | python3 - <<PY
+import json,sys,re
+rel=json.load(sys.stdin)
+needle=re.compile(r"${needle}")
+for a in rel.get("assets",[]):
+  n=a.get("name","")
+  if needle.search(n):
+    print(a.get("browser_download_url",""))
+    break
+PY
+)"
+          if [[ -z "$dl" ]]; then
+            echo "Could not find matching LLVM tarball asset for: $uname_s/$uname_m"
+            exit 1
+          fi
+
+          root="$RUNNER_TEMP/llvm21"
+          mkdir -p "$root"
+          archive="$root/llvm.tar.xz"
+          echo "Downloading: $dl"
+          curl -fL --retry 3 --retry-delay 2 -o "$archive" "$dl"
+
+          tar -xJf "$archive" -C "$root"
+          llvm_dir="$(find "$root" -maxdepth 1 -type d -name 'clang+llvm-*' | head -n 1)"
+          if [[ -z "${llvm_dir:-}" ]]; then
+            echo "LLVM directory not found after extraction."
+            exit 1
+          fi
+
+          echo "$llvm_dir/bin" >> "$GITHUB_PATH"
+          echo "CC=$llvm_dir/bin/clang"   >> "$GITHUB_ENV"
+          echo "CXX=$llvm_dir/bin/clang++" >> "$GITHUB_ENV"
+
+          "$llvm_dir/bin/clang" --version | head -n 2
+          "$llvm_dir/bin/clang++" --version | head -n 2
+
+          if ! "$llvm_dir/bin/clang" --version | grep -q 'clang version 21\.'; then
+            echo "Expected clang 21.x but got:"
+            "$llvm_dir/bin/clang" --version
+            exit 1
+          fi
+
+      # ------------------------------------------------------------
+      # Dependencies
+      # ------------------------------------------------------------
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install cmake ninja libsodium
+
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev zip ninja-build cmake
+
+      - name: Install dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
           choco install -y ninja
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
 
-      # ✅ Ensure MSVC env is set (INCLUDE/LIB/LINK/RC/MT) for clang-cl
+      # ------------------------------------------------------------
+      # Windows: MSVC env for clang-cl + modules scanning support
+      # ------------------------------------------------------------
+
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || 'amd64' }}
 
-      # ✅ Install LLVM/Clang 21.x via winget (reliable on GitHub runners)
-      - name: Install LLVM 21.x (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
+      # ------------------------------------------------------------
+      # Configure
+      # ------------------------------------------------------------
 
-          # Install latest available (21.x) from winget
-          winget install --id LLVM.LLVM -e --accept-package-agreements --accept-source-agreements
-
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path $llvmBin)) {
-            # fallback: locate clang-cl if install path differs
-            $clang = Get-Command clang-cl -ErrorAction SilentlyContinue
-            if ($clang) { $llvmBin = Split-Path -Parent $clang.Source }
-          }
-
-          $clangCl = Join-Path $llvmBin "clang-cl.exe"
-          $scanDeps = Join-Path $llvmBin "clang-scan-deps.exe"
-
-          if (-not (Test-Path $clangCl)) { throw "clang-cl.exe not found at: $clangCl" }
-          if (-not (Test-Path $scanDeps)) { throw "clang-scan-deps.exe not found at: $scanDeps" }
-
-          Add-Content $env:GITHUB_PATH $llvmBin
-          "CLANG_CL=$clangCl" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CLANG_SCAN_DEPS=$scanDeps" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-          & $clangCl --version
-          & $scanDeps --version
-
-      # ---------------- Toolchain (macOS/Linux) ----------------
-      - name: Configure LLVM toolchain (macOS and Linux)
-        if: runner.os != 'Windows'
-        run: |
-          BREW_CMD="brew"
-          if [ "${{ runner.os }}" == "Linux" ]; then
-            BREW_CMD="/home/linuxbrew/.linuxbrew/bin/brew"
-          fi
-          LLVM_PREFIX="$($BREW_CMD --prefix llvm)"
-          LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
-
-          echo "CC=${LLVM_PREFIX}/bin/clang" >> "$GITHUB_ENV"
-          echo "CXX=${LLVM_PREFIX}/bin/clang++" >> "$GITHUB_ENV"
-          echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
-
-          if [ "${{ runner.os }}" == "macOS" ]; then
-            SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
-            echo "SDKROOT=${SDKROOT}" >> "$GITHUB_ENV"
-            echo "CFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
-            echo "CXXFLAGS=-isysroot ${SDKROOT} -stdlib=libc++ -fexperimental-library" >> "$GITHUB_ENV"
-            echo "LDFLAGS=-isysroot ${SDKROOT} -L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
-          else
-            echo "CXXFLAGS=-stdlib=libc++ -fexperimental-library" >> "$GITHUB_ENV"
-            echo "LDFLAGS=-L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
-          fi
-
-      # ---------------- Configure ----------------
       - name: Configure project (macOS)
         if: runner.os == 'macOS'
         run: >
           cmake -S . -B build -G Ninja
           -DCMAKE_BUILD_TYPE=Release
           -DBUILD_TESTING=ON
-          -DCMAKE_OSX_SYSROOT="${SDKROOT}"
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
+          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
@@ -146,28 +214,35 @@ jobs:
           -DBUILD_TESTING=ON
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
+          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Windows: Ninja + clang-cl + explicit scan-deps for C++ modules scanning
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
           $target = "${{ matrix.clang_target }}"
 
+          if (-not $env:CLANG_SCAN_DEPS) { throw "CLANG_SCAN_DEPS env not set." }
+          if (-not (Test-Path $env:CLANG_SCAN_DEPS)) { throw "clang-scan-deps.exe not found: $env:CLANG_SCAN_DEPS" }
+
           cmake -S . -B build -G Ninja `
-            -DCMAKE_BUILD_TYPE=Release `
             -DBUILD_TESTING=ON `
+            -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
-            -DCMAKE_C_COMPILER="$env:CLANG_CL" `
-            -DCMAKE_CXX_COMPILER="$env:CLANG_CL" `
-            -DCMAKE_C_COMPILER_TARGET="$target" `
-            -DCMAKE_CXX_COMPILER_TARGET="$target" `
-            -DCMAKE_CXX_SCAN_FOR_MODULES=ON `
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_C_COMPILER_CLANG_SCAN_DEPS="$env:CLANG_SCAN_DEPS" `
             -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS="$env:CLANG_SCAN_DEPS" `
-            -DCMAKE_CXX_FLAGS="/std:c++latest /EHsc"
+            -DCMAKE_C_FLAGS="--target=$target" `
+            -DCMAKE_CXX_FLAGS="--target=$target /std:c++latest /EHsc" `
+            -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ---------------- Build/Test ----------------
+      # ------------------------------------------------------------
+      # Build / Test
+      # ------------------------------------------------------------
+
       - name: Build
         run: cmake --build build --parallel --config Release
 
@@ -175,14 +250,12 @@ jobs:
         if: matrix.name != 'windows-arm64'
         run: ctest --test-dir build --output-on-failure -C Release
 
-      # ---------------- Package ----------------
+      # ------------------------------------------------------------
+      # Package
+      # ------------------------------------------------------------
+
       - name: Package artifacts (macOS)
         if: runner.os == 'macOS'
-        run: |
-          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
-
-      - name: Package artifacts (Linux)
-        if: runner.os == 'Linux'
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
@@ -194,7 +267,11 @@ jobs:
           cp build/recover_key.exe . || cp build/Release/recover_key.exe .
           7z a ${{ matrix.name }}.zip vaultguard.exe recover_key.exe
 
-      # ---------------- Upload/Release ----------------
+      - name: Package artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
