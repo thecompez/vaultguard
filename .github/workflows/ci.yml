@@ -22,11 +22,11 @@ jobs:
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
-            cmake_arch: x64
+            clang_target: x86_64-pc-windows-msvc
           - os: windows-latest
             name: windows-arm64
             vcpkg_triplet: arm64-windows
-            cmake_arch: ARM64
+            clang_target: aarch64-pc-windows-msvc
           - os: ubuntu-24.04
             name: linux-x64
           - os: ubuntu-24.04-arm
@@ -49,7 +49,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y llvm
+          choco install -y llvm ninja
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
 
       - name: Install dependencies (Linux)
@@ -57,6 +57,39 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libsodium-dev zip
           /home/linuxbrew/.linuxbrew/bin/brew install cmake ninja llvm
+
+      # ✅ Ensure MSVC environment (INCLUDE/LIB/LINK/RC/MT) is set for clang-cl
+      - name: MSVC Dev Cmd (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || 'amd64' }}
+
+      # ✅ Make sure VS-bundled clang tools are on PATH (clang-cl + clang-scan-deps)
+      - name: Add VS LLVM tools to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin"
+          )
+
+          foreach ($p in $candidates) {
+            if (Test-Path $p) { Add-Content $env:GITHUB_PATH $p }
+          }
+
+          $cl = Get-Command clang-cl -ErrorAction SilentlyContinue
+          $sd = Get-Command clang-scan-deps -ErrorAction SilentlyContinue
+          Write-Host "clang-cl: $($cl?.Source)"
+          Write-Host "clang-scan-deps: $($sd?.Source)"
+
+          if (-not $cl) { throw "clang-cl.exe not found on PATH." }
+          if (-not $sd) { throw "clang-scan-deps.exe not found on PATH (required for CMake modules scanning)." }
 
       - name: Configure LLVM toolchain (macOS and Linux)
         if: runner.os != 'Windows'
@@ -81,32 +114,6 @@ jobs:
             echo "LDFLAGS=-L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
           fi
 
-      # ✅ NEW: Ensure clang-scan-deps is visible for the VS ClangCL toolset
-      - name: Add VS LLVM tools to PATH (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $candidates = @(
-            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin",
-            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\bin",
-            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin",
-            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\bin",
-            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin",
-            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin"
-          )
-
-          foreach ($p in $candidates) {
-            if (Test-Path $p) { Add-Content $env:GITHUB_PATH $p }
-          }
-
-          $scan = Get-Command clang-scan-deps -ErrorAction SilentlyContinue
-          $cl   = Get-Command clang-cl -ErrorAction SilentlyContinue
-
-          Write-Host "clang-cl: $($cl?.Source)"
-          Write-Host "clang-scan-deps: $($scan?.Source)"
-
-          if (-not $scan) { throw "clang-scan-deps.exe not found on PATH (required for CMake C++ modules scanning with clang-cl)." }
-
       - name: Configure project (macOS)
         if: runner.os == 'macOS'
         run: >
@@ -117,23 +124,23 @@ jobs:
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
 
+      # ✅ FIXED: Windows uses Ninja + clang-cl (works with CMake C++ modules scanning)
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $arch = "${{ matrix.cmake_arch }}"
-          $archFlag = ""
-          if ($arch -ne "") { $archFlag = "-A $arch" }
+          $target = "${{ matrix.clang_target }}"
 
-          cmake -S . -B build $archFlag `
-            -G "Visual Studio 17 2022" `
-            -T ClangCL `
+          cmake -S . -B build -G Ninja `
             -DBUILD_TESTING=ON `
+            -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
-            -DCMAKE_CXX_STANDARD=23 `
-            -DCMAKE_CXX_STANDARD_REQUIRED=ON `
-            -DCMAKE_CXX_FLAGS="/std:c++latest /EHsc"
+            -DCMAKE_C_COMPILER=clang-cl `
+            -DCMAKE_CXX_COMPILER=clang-cl `
+            -DCMAKE_C_FLAGS="--target=$target" `
+            -DCMAKE_CXX_FLAGS="--target=$target /std:c++latest /EHsc" `
+            -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
@@ -148,7 +155,7 @@ jobs:
         run: cmake --build build --parallel --config Release
 
       - name: Test
-        if: matrix.cmake_arch != 'ARM64'
+        if: matrix.name != 'windows-arm64'
         run: ctest --test-dir build --output-on-failure -C Release
 
       - name: Package artifacts (macOS)
@@ -160,8 +167,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cp build/Release/vaultguard.exe . || cp build/vaultguard.exe .
-          cp build/Release/recover_key.exe . || cp build/recover_key.exe .
+          cp build/vaultguard.exe . || cp build/Release/vaultguard.exe .
+          cp build/recover_key.exe . || cp build/Release/recover_key.exe .
           7z a ${{ matrix.name }}.zip vaultguard.exe recover_key.exe
 
       - name: Package artifacts (Linux)
