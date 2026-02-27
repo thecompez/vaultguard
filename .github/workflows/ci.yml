@@ -29,6 +29,7 @@ jobs:
             name: windows-arm64
             vcpkg_triplet: arm64-windows
             vs_arch: ARM64
+
           - os: windows-latest
             name: windows-x86
             vcpkg_triplet: x86-windows
@@ -42,6 +43,8 @@ jobs:
             name: linux-x64
           - os: ubuntu-24.04-arm
             name: linux-arm64
+
+          # Linux ARMv7 (armhf) via container (QEMU)
           - os: ubuntu-24.04
             name: linux-armv7
             linux_arch: armv7
@@ -62,7 +65,7 @@ jobs:
       # ---------------------------
 
       - name: Install CMake ${{ env.CMAKE_VERSION }} (macOS/Linux)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.name != 'linux-armv7'
         shell: bash
         run: |
           set -euo pipefail
@@ -113,29 +116,21 @@ jobs:
           brew install ninja llvm libsodium
 
       - name: Install dependencies (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.name != 'linux-armv7'
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update
 
           if [ "${{ matrix.name }}" = "linux-x86" ]; then
-            # 32-bit x86 target on x86_64 host
             sudo apt-get install -y zip gcc-multilib g++-multilib libc6-dev-i386 pkg-config
             sudo dpkg --add-architecture i386
             sudo apt-get update
             sudo apt-get install -y libsodium-dev:i386
-
-          elif [ "${{ matrix.name }}" = "linux-armv7" ]; then
-            sudo apt-get install -y zip pkg-config \
-              gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
-              libsodium-dev:armhf
-
           else
             sudo apt-get install -y zip libsodium-dev
           fi
 
-          # Host tools (OK to be x86_64 / aarch64 host)
           /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
 
       - name: Install dependencies (Windows)
@@ -157,7 +152,7 @@ jobs:
       # ---------------------------
 
       - name: Configure LLVM toolchain (macOS and Linux)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.name != 'linux-armv7'
         shell: bash
         run: |
           set -euo pipefail
@@ -186,14 +181,14 @@ jobs:
       # ---------------------------
 
       - name: Tool versions (macOS/Linux)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.name != 'linux-armv7'
         shell: bash
         run: |
           echo "cmake: $(cmake --version | head -n 1)"
           echo "clang: $(clang++ --version | head -n 1)"
           echo "ninja: $(ninja --version || true)"
           if [ "${{ runner.os }}" = "Linux" ]; then
-            dpkg -l | grep -E 'libsodium-dev|zip|arm-linux-gnueabihf|multilib' || true
+            dpkg -l | grep -E 'libsodium-dev|zip' || true
           fi
 
       - name: Tool versions (Windows)
@@ -217,6 +212,42 @@ jobs:
           if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
 
       # ---------------------------
+      # Linux ARMv7 build (container + QEMU)
+      # ---------------------------
+
+      - name: Set up QEMU (linux-armv7)
+        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Build + package in ARMv7 container (linux-armv7)
+        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/src" -w /src \
+            arm32v7/ubuntu:24.04 bash -lc '
+              set -euo pipefail
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git build-essential ninja-build zip \
+                libsodium-dev cmake
+
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_CXX_SCAN_FOR_MODULES=ON
+
+              cmake --build build --parallel
+              zip -j linux-armv7.zip build/vaultguard build/recover_key
+            '
+
+          ls -lah linux-armv7.zip
+
+      # ---------------------------
       # Configure
       # ---------------------------
 
@@ -232,30 +263,10 @@ jobs:
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
       - name: Configure project (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.name != 'linux-armv7'
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ "${{ matrix.name }}" = "linux-armv7" ]; then
-            # Cross compile (armhf)
-            cmake -S . -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_TESTING=OFF \
-              -DCMAKE_SYSTEM_NAME=Linux \
-              -DCMAKE_SYSTEM_PROCESSOR=armv7 \
-              -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
-              -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ \
-              -DCMAKE_C_FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=hard" \
-              -DCMAKE_CXX_FLAGS="-march=armv7-a -mfpu=neon -mfloat-abi=hard" \
-              -DCMAKE_FIND_ROOT_PATH="/usr/arm-linux-gnueabihf;/usr/lib/arm-linux-gnueabihf;/usr/include" \
-              -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-              -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-              -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-              -DCMAKE_CXX_SCAN_FOR_MODULES=ON
-            exit 0
-          fi
-
           extra=""
           if [ "${{ matrix.name }}" = "linux-x86" ]; then
             extra="-DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DCMAKE_EXE_LINKER_FLAGS=-m32"
@@ -295,7 +306,7 @@ jobs:
         run: cmake --build build --parallel --config Release
 
       - name: Build (macOS/Linux)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.name != 'linux-armv7'
         run: cmake --build build --parallel --config Release
 
       # ---------------------------
@@ -324,8 +335,7 @@ jobs:
           7z a "${{ matrix.name }}.zip" vaultguard.exe recover_key.exe
 
       - name: Package artifacts (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
+        if: runner.os == 'Linux' && matrix.name != 'linux-armv7'
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
