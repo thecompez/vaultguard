@@ -81,6 +81,32 @@ jobs:
             echo "LDFLAGS=-L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
           fi
 
+      # ✅ NEW: Ensure clang-scan-deps is visible for the VS ClangCL toolset
+      - name: Add VS LLVM tools to PATH (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $candidates = @(
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Tools\Llvm\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Tools\Llvm\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin",
+            "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\bin"
+          )
+
+          foreach ($p in $candidates) {
+            if (Test-Path $p) { Add-Content $env:GITHUB_PATH $p }
+          }
+
+          $scan = Get-Command clang-scan-deps -ErrorAction SilentlyContinue
+          $cl   = Get-Command clang-cl -ErrorAction SilentlyContinue
+
+          Write-Host "clang-cl: $($cl?.Source)"
+          Write-Host "clang-scan-deps: $($scan?.Source)"
+
+          if (-not $scan) { throw "clang-scan-deps.exe not found on PATH (required for CMake C++ modules scanning with clang-cl)." }
+
       - name: Configure project (macOS)
         if: runner.os == 'macOS'
         run: >
@@ -99,7 +125,6 @@ jobs:
           $archFlag = ""
           if ($arch -ne "") { $archFlag = "-A $arch" }
 
-          # Use clang-cl (LLVM on Windows runner)
           cmake -S . -B build $archFlag `
             -G "Visual Studio 17 2022" `
             -T ClangCL `
