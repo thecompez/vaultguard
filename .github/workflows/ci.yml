@@ -30,15 +30,19 @@ jobs:
             vcpkg_triplet: arm64-windows
             vs_arch: ARM64
 
+          - os: windows-latest
+            name: windows-x86
+            vcpkg_triplet: x86-windows
+            vs_arch: Win32
+
+          - os: ubuntu-24.04
+            name: linux-x86
+            linux_arch: x86
+
           - os: ubuntu-24.04
             name: linux-x64
           - os: ubuntu-24.04-arm
             name: linux-arm64
-
-          # Linux armv7 (32-bit) via cross-compile on x64 runner
-          - os: ubuntu-24.04
-            name: linux-armv7
-            cross: armv7
 
     permissions:
       contents: write
@@ -93,6 +97,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
+          # Pin CMake version via Chocolatey
           choco install -y cmake --version=$env:CMAKE_VERSION --allow-downgrade
           refreshenv
           cmake --version
@@ -106,38 +111,25 @@ jobs:
         run: |
           brew install ninja llvm libsodium
 
-      - name: Install dependencies (Linux native)
-        if: runner.os == 'Linux' && matrix.name != 'linux-armv7'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y zip libsodium-dev
-          /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
-
-      # armv7 cross toolchain + deps (build-only)
-      - name: Install dependencies (Linux armv7 cross)
-        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y \
-            zip \
-            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
-            pkg-config-arm-linux-gnueabihf
 
-          # Build libsodium for armv7 (so link works)
-          ver="1.0.21"
-          curl -fsSL "https://download.libsodium.org/libsodium/releases/libsodium-${ver}.tar.gz" -o "${RUNNER_TEMP}/libsodium-${ver}.tar.gz"
-          tar -xzf "${RUNNER_TEMP}/libsodium-${ver}.tar.gz" -C "${RUNNER_TEMP}"
-          pushd "${RUNNER_TEMP}/libsodium-${ver}"
-            ./configure \
-              --host=arm-linux-gnueabihf \
-              --prefix="${RUNNER_TEMP}/armv7-prefix" \
-              --enable-static \
-              --disable-shared
-            make -j"$(nproc)"
-            make install
-          popd
+          if [ "${{ matrix.name }}" = "linux-x86" ]; then
+            # 32-bit toolchain + common 32-bit runtime libs
+            sudo apt-get install -y zip gcc-multilib g++-multilib libc6-dev-i386 pkg-config
+
+            # libsodium 32-bit dev package (Ubuntu multiarch)
+            sudo dpkg --add-architecture i386
+            sudo apt-get update
+            sudo apt-get install -y libsodium-dev:i386
+          else
+            sudo apt-get install -y zip libsodium-dev
+          fi
+
+          /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
@@ -151,14 +143,14 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || 'amd64' }}
+          arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || (matrix.name == 'windows-x86' && 'amd64_x86' || 'amd64') }}
 
       # ---------------------------
       # Toolchain: macOS + Linux (brew llvm)
       # ---------------------------
 
       - name: Configure LLVM toolchain (macOS and Linux)
-        if: runner.os != 'Windows' && matrix.name != 'linux-armv7'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           BREW_CMD="brew"
@@ -180,30 +172,12 @@ jobs:
             echo "LDFLAGS=-isysroot ${SDKROOT} -L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
           fi
 
-      # armv7: create toolchain file for cross build
-      - name: Create CMake toolchain (armv7)
-        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
-        shell: bash
-        run: |
-          cat > "${RUNNER_TEMP}/toolchain-armv7.cmake" <<'EOF'
-          set(CMAKE_SYSTEM_NAME Linux)
-          set(CMAKE_SYSTEM_PROCESSOR armv7)
-
-          set(CMAKE_C_COMPILER   arm-linux-gnueabihf-gcc)
-          set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
-
-          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-          EOF
-
       # ---------------------------
       # Print versions (so you can confirm parity)
       # ---------------------------
 
       - name: Tool versions (macOS/Linux)
-        if: runner.os != 'Windows' && matrix.name != 'linux-armv7'
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           echo "cmake: $(cmake --version | head -n 1)"
@@ -213,29 +187,23 @@ jobs:
             dpkg -l | grep -E 'libsodium-dev|zip' || true
           fi
 
-      - name: Tool versions (Linux armv7 cross)
-        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
-        shell: bash
-        run: |
-          echo "cmake: $(cmake --version | head -n 1)"
-          arm-linux-gnueabihf-g++ --version | head -n 1
-          echo "prefix: ${RUNNER_TEMP}/armv7-prefix"
-          ls -la "${RUNNER_TEMP}/armv7-prefix/lib" || true
-
       - name: Tool versions (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cmake --version
 
+          # VS / MSVC version (safe, no failing exit codes)
           $vsver = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products * -property installationVersion) 2>$null
           if ($vsver) { Write-Host "Visual Studio: $vsver" }
 
+          # Show where cl.exe is, then print version without failing the step
           $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
           if ($cl) {
             Write-Host "cl.exe: $($cl.Source)"
             cmd /c "cl /Bv" | Out-Host
+            # Some environments still return non-zero for cl commands; don't fail the job
             $global:LASTEXITCODE = 0
           }
 
@@ -257,30 +225,25 @@ jobs:
           -DCMAKE_CXX_COMPILER="${CXX}"
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # Linux native: build with clang (works), disable tests for now
+      # ✅ Linux: build with clang (works), but disable tests for now
       - name: Configure project (Linux)
-        if: runner.os == 'Linux' && matrix.name != 'linux-armv7'
-        run: >
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DBUILD_TESTING=OFF
-          -DCMAKE_C_COMPILER="${CC}"
-          -DCMAKE_CXX_COMPILER="${CXX}"
-          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
-
-      # Linux armv7: cross build with GCC, disable modules scanning for stability
-      - name: Configure project (Linux armv7)
-        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        if: runner.os == 'Linux'
         shell: bash
         run: |
+          extra=""
+          if [ "${{ matrix.name }}" = "linux-x86" ]; then
+            extra="-DCMAKE_C_FLAGS=-m32 -DCMAKE_CXX_FLAGS=-m32 -DCMAKE_EXE_LINKER_FLAGS=-m32"
+          fi
+
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_TESTING=OFF \
-            -DCMAKE_TOOLCHAIN_FILE="${RUNNER_TEMP}/toolchain-armv7.cmake" \
-            -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/armv7-prefix" \
-            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
+            -DCMAKE_C_COMPILER="${CC}" \
+            -DCMAKE_CXX_COMPILER="${CXX}" \
+            -DCMAKE_CXX_SCAN_FOR_MODULES=ON \
+            $extra
 
-      # Windows: VS generator + MSVC cl.exe
+      # ✅ Windows: VS generator + MSVC cl.exe
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -337,14 +300,8 @@ jobs:
 
       - name: Package artifacts (Linux)
         if: runner.os == 'Linux'
-        shell: bash
         run: |
-          # Native builds output to build/..., cross builds too (but different arch)
-          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key || {
-            echo "Expected binaries not found. Listing build dir:"
-            ls -la build || true
-            exit 1
-          }
+          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
       # ---------------------------
       # Upload + Release
