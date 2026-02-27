@@ -117,28 +117,51 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
 
-          if [ "${{ matrix.name }}" = "linux-x86" ]; then
-            # 32-bit x86 target on x86_64 host
-            sudo apt-get install -y zip gcc-multilib g++-multilib libc6-dev-i386 pkg-config
-            sudo dpkg --add-architecture i386
-            sudo apt-get update
-            sudo apt-get install -y libsodium-dev:i386
+          if [ "${{ matrix.name }}" = "linux-armv7" ]; then
+            # 1) Ensure default Ubuntu sources apply ONLY to amd64 (avoid armhf hitting security.ubuntu.com -> 404)
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              if ! grep -q '^Architectures: .*amd64' /etc/apt/sources.list.d/ubuntu.sources; then
+                sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/g' /etc/apt/sources.list.d/ubuntu.sources
+              fi
+            elif [ -f /etc/apt/sources.list ]; then
+              # Older style sources.list: keep it as-is; we'll add a separate armhf list below.
+              true
+            fi
 
-          elif [ "${{ matrix.name }}" = "linux-armv7" ]; then
-            # ARMv7 (armhf) cross-compile on x86_64 host
+            # 2) Add an armhf-only "ports" source (this is where armhf packages live)
+            sudo tee /etc/apt/sources.list.d/armhf-ports.sources >/dev/null <<'EOF'
+      Types: deb
+      URIs: http://ports.ubuntu.com/ubuntu-ports
+      Suites: noble noble-updates noble-backports noble-security
+      Components: main universe multiverse restricted
+      Architectures: armhf
+      Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+      EOF
+
+            # 3) Enable armhf arch + update indexes
             sudo dpkg --add-architecture armhf
             sudo apt-get update
+
+            # 4) ARMv7 (armhf) cross toolchain + libsodium armhf
             sudo apt-get install -y zip pkg-config \
               gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
               libsodium-dev:armhf
 
           else
-            sudo apt-get install -y zip libsodium-dev
+            sudo apt-get update
+
+            if [ "${{ matrix.name }}" = "linux-x86" ]; then
+              sudo apt-get install -y zip gcc-multilib g++-multilib libc6-dev-i386 pkg-config
+              sudo dpkg --add-architecture i386
+              sudo apt-get update
+              sudo apt-get install -y libsodium-dev:i386
+            else
+              sudo apt-get install -y zip libsodium-dev
+            fi
           fi
 
-          # Host tools (OK to be x86_64 / aarch64 host)
+          # Host tools (fine to be host-arch)
           /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
 
       - name: Install dependencies (Windows)
