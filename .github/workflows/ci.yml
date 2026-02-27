@@ -22,6 +22,7 @@ jobs:
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
+            cmake_arch: x64
           - os: windows-latest
             name: windows-arm64
             vcpkg_triplet: arm64-windows
@@ -46,7 +47,11 @@ jobs:
 
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
-        run: vcpkg install libsodium:${{ matrix.vcpkg_triplet }}
+        shell: pwsh
+        run: |
+          # Ensure vcpkg is available and consistent
+          vcpkg --version
+          vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
 
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
@@ -95,7 +100,18 @@ jobs:
           if [ "${{ matrix.cmake_arch }}" != "" ]; then
             ARCH_FLAG="-A ${{ matrix.cmake_arch }}"
           fi
-          cmake -S . -B build $ARCH_FLAG -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} -DCMAKE_CXX_FLAGS="/std:c++latest"
+
+          # IMPORTANT:
+          # - Force C++23 dialect so CMake doesn't require CXX26 on MSVC
+          # - Still enable /std:c++latest for newest MSVC mode
+          cmake -S . -B build $ARCH_FLAG \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DCMAKE_TOOLCHAIN_FILE="$VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} \
+            -DCMAKE_CXX_STANDARD=23 \
+            -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+            -DCMAKE_CXX_FLAGS="/std:c++latest"
 
       - name: Configure project (Linux)
         if: runner.os == 'Linux'

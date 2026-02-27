@@ -1,12 +1,19 @@
 cmake_minimum_required(VERSION 3.26)
 project(VaultGuard LANGUAGES C CXX)
 
-# Set C++26 standard
-set(CMAKE_CXX_STANDARD 26)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
+# -------------------------
+# Language standards
+# -------------------------
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# (Optional) If you still want "latest" mode on MSVC:
+if(MSVC)
+    add_compile_options(/std:c++latest)
+endif()
 
 # Include FetchContent module for dependency management
 include(FetchContent)
@@ -258,20 +265,16 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     target_compile_options(vaultguard PRIVATE
             /experimental:module
-            /module:stdIfcDir "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}/modules"
     )
     target_compile_options(recover_key PRIVATE
             /experimental:module
-            /module:stdIfcDir "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}/modules"
     )
     if(BUILD_TESTING)
         target_compile_options(vaultguard_tests PRIVATE
                 /experimental:module
-                /module:stdIfcDir "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}/modules"
         )
         target_compile_options(vaultguard_integration_tests PRIVATE
                 /experimental:module
-                /module:stdIfcDir "${CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN}/modules"
         )
     endif()
 endif()
