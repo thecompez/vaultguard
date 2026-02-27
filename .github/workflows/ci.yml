@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ---------------------------
-      # Dependencies
+      # Install deps
       # ---------------------------
 
       - name: Install dependencies (macOS)
@@ -73,7 +73,7 @@ jobs:
           cmake --version
           clang-cl --version
 
-      # ✅ Ensure MSVC environment (INCLUDE/LIB/LINK/RC/MT)
+      # ✅ MSVC env for clang-cl
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -81,7 +81,7 @@ jobs:
           arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || 'amd64' }}
 
       # ---------------------------
-      # Toolchain setup (macOS/Linux)
+      # Toolchain: macOS + Linux (brew llvm)
       # ---------------------------
 
       - name: Configure LLVM toolchain (macOS and Linux)
@@ -94,13 +94,12 @@ jobs:
           fi
 
           LLVM_PREFIX="$($BREW_CMD --prefix llvm)"
-          LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
-
           echo "CC=${LLVM_PREFIX}/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=${LLVM_PREFIX}/bin/clang++" >> "$GITHUB_ENV"
           echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
+            LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
             SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
             echo "SDKROOT=${SDKROOT}" >> "$GITHUB_ENV"
             echo "CFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
@@ -123,7 +122,7 @@ jobs:
           -DCMAKE_CXX_COMPILER="${CXX}"
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Linux: build artifacts only (tests off to avoid GCC modules ICE / clang+libstdc++ module-mode issues)
+      # ✅ Linux: build with clang (works), but disable tests for now
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
         run: >
@@ -134,7 +133,7 @@ jobs:
           -DCMAKE_CXX_COMPILER="${CXX}"
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Windows: build artifacts only; disable module scanning so CMake generation succeeds
+      # ✅ Windows: disable modules scan so CMake can generate
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -142,7 +141,7 @@ jobs:
           $target = "${{ matrix.clang_target }}"
 
           cmake -S . -B build -G Ninja `
-            -DBUILD_TESTING=OFF `
+            -DBUILD_TESTING=ON `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
@@ -153,14 +152,18 @@ jobs:
             -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
 
       # ---------------------------
-      # Build + Test
+      # Build
       # ---------------------------
 
       - name: Build
         run: cmake --build build --parallel --config Release
 
-      - name: Test (macOS only)
-        if: runner.os == 'macOS'
+      # ---------------------------
+      # Test
+      # ---------------------------
+
+      - name: Test
+        if: runner.os == 'macOS' || (runner.os == 'Windows' && matrix.name != 'windows-arm64')
         run: ctest --test-dir build --output-on-failure -C Release
 
       # ---------------------------
