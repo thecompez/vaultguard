@@ -65,14 +65,15 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y llvm ninja 7zip
+          choco install -y cmake llvm ninja 7zip
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
 
-          # Prefer Chocolatey LLVM and keep it consistent (do NOT mix with VS LLVM)
+          # Prefer Chocolatey LLVM consistently
           $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path $llvmBin)) { throw "Chocolatey LLVM bin not found: $llvmBin" }
+          if (-not (Test-Path $llvmBin)) { throw "LLVM bin not found: $llvmBin" }
           Add-Content $env:GITHUB_PATH $llvmBin
 
+          cmake --version
           $cl = Get-Command clang-cl -ErrorAction SilentlyContinue
           $sd = Get-Command clang-scan-deps -ErrorAction SilentlyContinue
           Write-Host "clang-cl: $($cl.Source)"
@@ -80,7 +81,7 @@ jobs:
           if (-not $cl) { throw "clang-cl.exe not found on PATH." }
           if (-not $sd) { throw "clang-scan-deps.exe not found on PATH." }
 
-      # ✅ Ensure MSVC environment (INCLUDE/LIB/LINK/RC/MT) is set for clang-cl
+      # ✅ Ensure MSVC environment is set for clang-cl
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -101,6 +102,8 @@ jobs:
           fi
 
           LLVM_PREFIX="$($BREW_CMD --prefix llvm)"
+          LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
+
           echo "CC=${LLVM_PREFIX}/bin/clang" >> "$GITHUB_ENV"
           echo "CXX=${LLVM_PREFIX}/bin/clang++" >> "$GITHUB_ENV"
           echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
@@ -108,12 +111,13 @@ jobs:
           if [ "${{ runner.os }}" = "macOS" ]; then
             SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
             echo "SDKROOT=${SDKROOT}" >> "$GITHUB_ENV"
+
+            # Restore the working macOS setup (libc++ + rpath)
             echo "CFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
             echo "CXXFLAGS=-isysroot ${SDKROOT} -stdlib=libc++ -fexperimental-library" >> "$GITHUB_ENV"
-            echo "LDFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
+            echo "LDFLAGS=-isysroot ${SDKROOT} -L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
           else
-            # Linux: do NOT force libc++ unless you install/link it explicitly.
-            # Default libstdc++ is the most reliable on ubuntu runners.
+            # Linux: keep default libstdc++ (no -stdlib=libc++)
             echo "CFLAGS=" >> "$GITHUB_ENV"
             echo "CXXFLAGS=" >> "$GITHUB_ENV"
             echo "LDFLAGS=" >> "$GITHUB_ENV"
@@ -132,6 +136,7 @@ jobs:
           -DCMAKE_OSX_SYSROOT="${SDKROOT}"
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
+          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
       - name: Configure project (Linux)
         if: runner.os == 'Linux'
@@ -141,14 +146,15 @@ jobs:
           -DBUILD_TESTING=ON
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
+          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Windows: Ninja + clang-cl + explicit scan-deps path for C++ modules discovery
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $target = "${{ matrix.clang_target }}"
-          $scanDeps = (Get-Command clang-scan-deps).Source
+          $scanDeps = ((Get-Command clang-scan-deps).Source -replace '\\','/')
+          $resourceDir = (& clang-cl -print-resource-dir).Trim() -replace '\\','/'
 
           cmake -S . -B build -G Ninja `
             -DBUILD_TESTING=ON `
@@ -158,6 +164,7 @@ jobs:
             -DCMAKE_C_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER=clang-cl `
             -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS="$scanDeps" `
+            -DCMAKE_CXX_COMPILER_CLANG_RESOURCE_DIR="$resourceDir" `
             -DCMAKE_C_FLAGS="--target=$target" `
             -DCMAKE_CXX_FLAGS="--target=$target /std:c++latest /EHsc" `
             -DCMAKE_CXX_SCAN_FOR_MODULES=ON
