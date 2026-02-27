@@ -3,11 +3,15 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags:
+      - 'v*'
   pull_request:
 
 jobs:
   build-and-test:
     runs-on: macos-14
+    permissions:
+      contents: write
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
@@ -52,3 +56,13 @@ jobs:
           path: |
             build/vaultguard
             build/recover_key
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            build/vaultguard
+            build/recover_key
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
