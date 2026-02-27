@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, master]
     tags:
-      - 'v*'
+      - "v*"
   pull_request:
 
 jobs:
@@ -19,14 +19,17 @@ jobs:
             name: macos-arm64
           - os: macos-latest
             name: macos-x64
+
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
             clang_target: x86_64-pc-windows-msvc
+
           - os: windows-latest
             name: windows-arm64
             vcpkg_triplet: arm64-windows
             clang_target: aarch64-pc-windows-msvc
+
           - os: ubuntu-24.04
             name: linux-x64
           - os: ubuntu-24.04-arm
@@ -34,6 +37,7 @@ jobs:
 
     permissions:
       contents: write
+
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
 
@@ -44,38 +48,79 @@ jobs:
       # ---------------- macOS ----------------
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install cmake ninja llvm@21 libsodium
+        run: brew install cmake ninja llvm libsodium
 
       # ---------------- Linux ----------------
       - name: Install dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update && sudo apt-get install -y libsodium-dev zip
-          /home/linuxbrew/.linuxbrew/bin/brew install cmake ninja llvm@21
+          /home/linuxbrew/.linuxbrew/bin/brew install cmake ninja llvm
 
       # ---------------- Windows ----------------
-      # Use LLVM 21.x (Chocolatey) + Ninja + vcpkg libsodium
-      - name: Install dependencies (Windows)
+      - name: Install Ninja + vcpkg deps (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y ninja llvm --version=21.0.0 --allow-downgrade
+          choco install -y ninja
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
 
-      # Ensure MSVC environment (INCLUDE/LIB/LINK/RC/MT) is set for clang-cl
+      # ✅ Ensure MSVC environment (INCLUDE/LIB/LINK/RC/MT) is set for clang-cl
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || 'amd64' }}
 
-      # Force Chocolatey LLVM (C:\Program Files\LLVM\bin) so clang-scan-deps exists
-      - name: Configure LLVM toolchain (Windows)
+      # ✅ Install LLVM/Clang 21.x from official llvm-project GitHub releases (zip preferred)
+      - name: Install LLVM 21.x (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path $llvmBin)) { throw "LLVM bin not found at: $llvmBin" }
+          $ErrorActionPreference = "Stop"
+
+          $repo = "llvm/llvm-project"
+          $headers = @{ "Accept" = "application/vnd.github+json" }
+          if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
+
+          $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/$repo/releases?per_page=50" -Headers $headers
+          $rel = $releases | Where-Object { $_.tag_name -match '^llvmorg-21\.' } | Select-Object -First 1
+          if (-not $rel) { throw "No llvmorg-21.* release found." }
+
+          $asset = $rel.assets | Where-Object { $_.name -match 'win64.*\.zip$' } | Select-Object -First 1
+          $isZip = $true
+          if (-not $asset) {
+            $asset = $rel.assets | Where-Object { $_.name -match 'win64.*\.exe$' } | Select-Object -First 1
+            $isZip = $false
+          }
+          if (-not $asset) { throw "No Windows win64 asset (.zip or .exe) found for $($rel.tag_name)." }
+
+          $tmp = Join-Path $env:RUNNER_TEMP "llvm21"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+
+          $dl = Join-Path $tmp $asset.name
+          Write-Host "Downloading: $($asset.browser_download_url)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -Headers $headers -OutFile $dl
+
+          $root = Join-Path $tmp "root"
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+
+          if ($isZip) {
+            Expand-Archive -Path $dl -DestinationPath $root -Force
+            $top = Get-ChildItem $root -Directory | Select-Object -First 1
+            if (-not $top) { throw "LLVM zip extracted but no top directory found." }
+            $llvmRoot = $top.FullName
+          } else {
+            $llvmRoot = Join-Path $root "LLVM"
+            New-Item -ItemType Directory -Force -Path $llvmRoot | Out-Null
+            Write-Host "Installing LLVM silently to: $llvmRoot"
+            & $dl /S /D="$llvmRoot"
+          }
+
+          $llvmBin = Join-Path $llvmRoot "bin"
+          if (-not (Test-Path $llvmBin)) { throw "LLVM bin not found: $llvmBin" }
 
           Add-Content $env:GITHUB_PATH $llvmBin
 
@@ -91,7 +136,7 @@ jobs:
           echo "CLANG_CL=$clangCl" >> $env:GITHUB_ENV
           echo "CLANG_SCAN_DEPS=$scanDeps" >> $env:GITHUB_ENV
 
-      # ---------------- macOS/Linux toolchain ----------------
+      # ---------------- Toolchain (macOS/Linux) ----------------
       - name: Configure LLVM toolchain (macOS and Linux)
         if: runner.os != 'Windows'
         run: |
@@ -99,8 +144,7 @@ jobs:
           if [ "${{ runner.os }}" == "Linux" ]; then
             BREW_CMD="/home/linuxbrew/.linuxbrew/bin/brew"
           fi
-
-          LLVM_PREFIX="$($BREW_CMD --prefix llvm@21)"
+          LLVM_PREFIX="$($BREW_CMD --prefix llvm)"
           LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
 
           echo "CC=${LLVM_PREFIX}/bin/clang" >> "$GITHUB_ENV"
@@ -138,7 +182,7 @@ jobs:
           -DCMAKE_C_COMPILER="${CC}"
           -DCMAKE_CXX_COMPILER="${CXX}"
 
-      # Windows: Ninja + clang-cl + explicit clang-scan-deps for CMake modules scanning
+      # ✅ Windows: Ninja + clang-cl + scan-deps for C++ modules scanning
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -172,6 +216,11 @@ jobs:
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
+      - name: Package artifacts (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
+
       - name: Package artifacts (Windows)
         if: runner.os == 'Windows'
         shell: bash
@@ -179,11 +228,6 @@ jobs:
           cp build/vaultguard.exe . || cp build/Release/vaultguard.exe .
           cp build/recover_key.exe . || cp build/Release/recover_key.exe .
           7z a ${{ matrix.name }}.zip vaultguard.exe recover_key.exe
-
-      - name: Package artifacts (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
       # ---------------- Upload/Release ----------------
       - name: Upload artifacts
