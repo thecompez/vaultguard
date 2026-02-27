@@ -1,6 +1,5 @@
 module;
 
-#include <print>
 #include <format>
 #include <string>
 #include <vector>
@@ -20,18 +19,21 @@ module;
 #include <cstdio>
 #include <cstring>
 #include <cerrno>
-#include <fcntl.h>
-#include <unistd.h>
 #include <iostream>
 #include <thread>
 #include <chrono>
 #include <iomanip>
 #include <system_error>
 
-#ifdef __unix__
-#include <termios.h>
-#elif defined(_WIN32)
-#include <windows.h>
+#if defined(_WIN32)
+  #include <windows.h>
+  #include <process.h>
+  #include <io.h>
+#else
+  #include <unistd.h>
+  #if defined(__unix__) || defined(__APPLE__)
+    #include <termios.h>
+  #endif
 #endif
 
 export module wallet;
@@ -63,6 +65,60 @@ constexpr size_t NEXT_SECTOR_SIZE = sizeof(uint64_t); // 8
 constexpr size_t CHECKSUM_SIZE = sizeof(uint32_t); // 4
 constexpr size_t CHECKSUM_OFFSET = SECTOR_SIZE - CHECKSUM_SIZE; // 508
 constexpr size_t MAX_KEY_DATA_LENGTH = CHECKSUM_OFFSET - KEY_DATA_OFFSET - NEXT_SECTOR_SIZE; // 456
+
+template <typename... Args>
+void print(const std::format_string<Args...> format, Args&&... args) {
+    const std::string rendered = std::format(format, std::forward<Args>(args)...);
+    std::fwrite(rendered.data(), sizeof(char), rendered.size(), stdout);
+    std::fflush(stdout);
+}
+
+template <typename... Args>
+void print(FILE* stream, const std::format_string<Args...> format, Args&&... args) {
+    FILE* out = stream == nullptr ? stdout : stream;
+    const std::string rendered = std::format(format, std::forward<Args>(args)...);
+    std::fwrite(rendered.data(), sizeof(char), rendered.size(), out);
+    std::fflush(out);
+}
+
+template <typename... Args>
+void println(const std::format_string<Args...> format, Args&&... args) {
+    vaultguard::wallet::print(stdout, format, std::forward<Args>(args)...);
+    std::fputc('\n', stdout);
+    std::fflush(stdout);
+}
+
+template <typename... Args>
+void println(FILE* stream, const std::format_string<Args...> format, Args&&... args) {
+    FILE* out = stream == nullptr ? stdout : stream;
+    vaultguard::wallet::print(out, format, std::forward<Args>(args)...);
+    std::fputc('\n', out);
+    std::fflush(out);
+}
+
+int current_process_id() {
+#if defined(_WIN32)
+    return _getpid();
+#else
+    return getpid();
+#endif
+}
+
+FILE* open_command_pipe(const char* command, const char* mode) {
+#if defined(_WIN32)
+    return _popen(command, mode);
+#else
+    return popen(command, mode);
+#endif
+}
+
+int close_command_pipe(FILE* pipe) {
+#if defined(_WIN32)
+    return _pclose(pipe);
+#else
+    return pclose(pipe);
+#endif
+}
 
 void secure_zero_string(std::string& value) {
     if (!value.empty()) {
@@ -138,7 +194,7 @@ std::string shell_quote(const std::string& input) {
 // Write block to file-based "sector"
 bool write_block_to_sector(const std::string& file_path, uint64_t sector, const VaultBlock& block) {
     if (block.key_data.size() > MAX_KEY_DATA_LENGTH) {
-        std::println(stderr, "{}Error: key_data is too large for sector layout ({} > {}).{}",
+        vaultguard::wallet::println(stderr, "{}Error: key_data is too large for sector layout ({} > {}).{}",
                      COLOR_RED, block.key_data.size(), MAX_KEY_DATA_LENGTH, COLOR_RESET);
         return false;
     }
@@ -148,7 +204,7 @@ bool write_block_to_sector(const std::string& file_path, uint64_t sector, const 
         // Create file if it doesn't exist
         out.open(file_path, std::ios::binary | std::ios::out);
         if (!out) {
-            std::println(stderr, "{}Error: Cannot open file {} for writing (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Cannot open file {} for writing (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
             return false;
         }
         // Initialize file with enough space for sectors
@@ -158,12 +214,12 @@ bool write_block_to_sector(const std::string& file_path, uint64_t sector, const 
         out.open(file_path, std::ios::binary | std::ios::in | std::ios::out);
     }
     if (!out) {
-        std::println(stderr, "{}Error: Cannot open file {} for writing (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Cannot open file {} for writing (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
         return false;
     }
     out.seekp(static_cast<std::streamoff>(sector * SECTOR_SIZE));
     if (!out) {
-        std::println(stderr, "{}Error: Cannot seek to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Cannot seek to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
         out.close();
         return false;
     }
@@ -171,7 +227,7 @@ bool write_block_to_sector(const std::string& file_path, uint64_t sector, const 
     const uint32_t key_data_length = static_cast<uint32_t>(block.key_data.size());
     const size_t next_sector_offset = KEY_DATA_OFFSET + key_data_length;
     if (next_sector_offset + NEXT_SECTOR_SIZE > CHECKSUM_OFFSET) {
-        std::println(stderr, "{}Error: Invalid block layout for sector {} (payload overrun).{}", COLOR_RED, sector, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Invalid block layout for sector {} (payload overrun).{}", COLOR_RED, sector, COLOR_RESET);
         out.close();
         return false;
     }
@@ -190,13 +246,13 @@ bool write_block_to_sector(const std::string& file_path, uint64_t sector, const 
 
     out.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(SECTOR_SIZE));
     if (!out) {
-        std::println(stderr, "{}Error: Failed to write block to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to write block to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
         out.close();
         return false;
     }
     out.close();
     if (utils::is_debug_enabled()) {
-        std::println(stderr, "{}Debug: Successfully wrote block to sector {} in file {}.{}", COLOR_CYAN, sector, file_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Debug: Successfully wrote block to sector {} in file {}.{}", COLOR_CYAN, sector, file_path, COLOR_RESET);
     }
     return true;
 }
@@ -206,19 +262,19 @@ bool write_block_to_sector(const std::string& file_path, uint64_t sector, const 
 bool read_block_from_sector(const std::string& file_path, uint64_t sector, VaultBlock& block) {
     std::ifstream in(file_path, std::ios::binary);
     if (!in) {
-        std::println(stderr, "{}Error: Cannot open file {} for reading (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Cannot open file {} for reading (errno: {}).{}", COLOR_RED, file_path, errno, COLOR_RESET);
         return false;
     }
     in.seekg(static_cast<std::streamoff>(sector * SECTOR_SIZE));
     if (!in) {
-        std::println(stderr, "{}Error: Cannot seek to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Cannot seek to sector {} in file {} (errno: {}).{}", COLOR_RED, sector, file_path, errno, COLOR_RESET);
         in.close();
         return false;
     }
     std::array<unsigned char, SECTOR_SIZE> buffer {};
     in.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(SECTOR_SIZE));
     if (in.gcount() != static_cast<std::streamsize>(SECTOR_SIZE)) {
-        std::println(stderr, "{}Error: Failed to read {} bytes from sector {} in file {} (read {} bytes, errno: {}).{}",
+        vaultguard::wallet::println(stderr, "{}Error: Failed to read {} bytes from sector {} in file {} (read {} bytes, errno: {}).{}",
                      COLOR_RED, SECTOR_SIZE, sector, file_path, in.gcount(), errno, COLOR_RESET);
         in.close();
         return false;
@@ -226,14 +282,14 @@ bool read_block_from_sector(const std::string& file_path, uint64_t sector, Vault
     in.close();
 
     if (std::strncmp(reinterpret_cast<char*>(buffer.data()), "VAULTGRD", 8) != 0) {
-        std::println(stderr, "{}Error: Invalid header in sector {} of file {}. Expected 'VAULTGRD'.{}", COLOR_RED, sector, file_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Invalid header in sector {} of file {}. Expected 'VAULTGRD'.{}", COLOR_RED, sector, file_path, COLOR_RESET);
         return false;
     }
 
     uint32_t checksum;
     std::memcpy(&checksum, buffer.data() + CHECKSUM_OFFSET, CHECKSUM_SIZE);
     if (checksum != utils::crc32(buffer.data(), CHECKSUM_OFFSET)) {
-        std::println(stderr, "{}Error: Checksum mismatch for sector {} in file {}.{}", COLOR_RED, sector, file_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Checksum mismatch for sector {} in file {}.{}", COLOR_RED, sector, file_path, COLOR_RESET);
         return false;
     }
 
@@ -243,14 +299,14 @@ bool read_block_from_sector(const std::string& file_path, uint64_t sector, Vault
     uint32_t key_data_length = 0;
     std::memcpy(&key_data_length, buffer.data() + KEY_LENGTH_OFFSET, sizeof(key_data_length));
     if (key_data_length > MAX_KEY_DATA_LENGTH) {
-        std::println(stderr, "{}Error: Invalid key_data_length {} in sector {} (max allowed {}).{}",
+        vaultguard::wallet::println(stderr, "{}Error: Invalid key_data_length {} in sector {} (max allowed {}).{}",
                      COLOR_RED, key_data_length, sector, MAX_KEY_DATA_LENGTH, COLOR_RESET);
         return false;
     }
 
     const size_t next_sector_offset = KEY_DATA_OFFSET + key_data_length;
     if (next_sector_offset + NEXT_SECTOR_SIZE > CHECKSUM_OFFSET) {
-        std::println(stderr, "{}Error: Corrupted block layout in sector {}.{}", COLOR_RED, sector, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Corrupted block layout in sector {}.{}", COLOR_RED, sector, COLOR_RESET);
         return false;
     }
 
@@ -290,7 +346,7 @@ bool store_key_in_blockchain(const std::string& device_path, const std::string& 
         std::vector<unsigned char> ciphertext(key.size() + crypto_secretbox_MACBYTES);
         int ret = crypto_secretbox_easy(ciphertext.data(), reinterpret_cast<const unsigned char*>(key.data()), key.size(), nonce, derived_key);
         if (ret != 0) {
-            std::println(stderr, "{}Error: Failed to encrypt key for sector {} (crypto_secretbox_easy returned {}).{}", COLOR_RED, sectors[i], ret, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Failed to encrypt key for sector {} (crypto_secretbox_easy returned {}).{}", COLOR_RED, sectors[i], ret, COLOR_RESET);
             continue;
         }
 
@@ -299,7 +355,7 @@ bool store_key_in_blockchain(const std::string& device_path, const std::string& 
         std::memcpy(key_data.data() + salt.size(), nonce, crypto_secretbox_NONCEBYTES);
         std::memcpy(key_data.data() + salt.size() + crypto_secretbox_NONCEBYTES, ciphertext.data(), ciphertext.size());
         if (key_data.size() > MAX_KEY_DATA_LENGTH) {
-            std::println(stderr, "{}Error: Encrypted key payload is too large for a sector ({} > {}).{}",
+            vaultguard::wallet::println(stderr, "{}Error: Encrypted key payload is too large for a sector ({} > {}).{}",
                          COLOR_RED, key_data.size(), MAX_KEY_DATA_LENGTH, COLOR_RESET);
             continue;
         }
@@ -320,24 +376,24 @@ bool store_key_in_blockchain(const std::string& device_path, const std::string& 
             block.checksum = utils::crc32(serialized_block.data(), CHECKSUM_OFFSET);
             std::memcpy(serialized_block.data() + CHECKSUM_OFFSET, &block.checksum, CHECKSUM_SIZE);
             crypto_hash_sha256(prev_hash, serialized_block.data(), SECTOR_SIZE);
-            std::println("{}", COLOR_GREEN);
-            std::println("Key stored in sector {} of {}. Your keys are locked in an unbreakable digital vault! 🔒", sectors[i], sector_file);
-            std::println("{}", COLOR_RESET);
+            vaultguard::wallet::println("{}", COLOR_GREEN);
+            vaultguard::wallet::println("Key stored in sector {} of {}. Your keys are locked in an unbreakable digital vault! 🔒", sectors[i], sector_file);
+            vaultguard::wallet::println("{}", COLOR_RESET);
             success = true;
         } else {
-            std::println(stderr, "{}Error: Failed to write block to sector {}.{}", COLOR_RED, sectors[i], COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Failed to write block to sector {}.{}", COLOR_RED, sectors[i], COLOR_RESET);
         }
     }
 
     // Fallback to filesystem if sector storage fails
     if (!success) {
-        std::println("{}", COLOR_YELLOW);
-        std::println("Warning: Failed to store key in sectors. Saving to filesystem as fallback.");
-        std::println("{}", COLOR_RESET);
+        vaultguard::wallet::println("{}", COLOR_YELLOW);
+        vaultguard::wallet::println("Warning: Failed to store key in sectors. Saving to filesystem as fallback.");
+        vaultguard::wallet::println("{}", COLOR_RESET);
         std::string key_file = output_path + "/vault_key.dat";
         std::ofstream out(key_file, std::ios::binary);
         if (!out) {
-            std::println(stderr, "{}Error: Failed to save key to {} (errno: {}).{}", COLOR_RED, key_file, errno, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Failed to save key to {} (errno: {}).{}", COLOR_RED, key_file, errno, COLOR_RESET);
             crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
             return false;
         }
@@ -360,15 +416,15 @@ bool store_key_in_blockchain(const std::string& device_path, const std::string& 
                 std::filesystem::perm_options::replace,
                 permissions_error);
             if (permissions_error) {
-                std::println(stderr, "{}Warning: Failed to enforce strict permissions on {}: {}.{}",
+                vaultguard::wallet::println(stderr, "{}Warning: Failed to enforce strict permissions on {}: {}.{}",
                              COLOR_YELLOW, key_file, permissions_error.message(), COLOR_RESET);
             }
 
-            std::println("{}", COLOR_GREEN);
-            std::println("Key saved to {} as fallback.{}", key_file, COLOR_RESET);
+            vaultguard::wallet::println("{}", COLOR_GREEN);
+            vaultguard::wallet::println("Key saved to {} as fallback.{}", key_file, COLOR_RESET);
             success = true;
         } else {
-            std::println(stderr, "{}Error: Failed to encrypt key for fallback file {}.{}", COLOR_RED, key_file, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Failed to encrypt key for fallback file {}.{}", COLOR_RED, key_file, COLOR_RESET);
         }
     }
 
@@ -384,7 +440,7 @@ std::string recover_key_from_blockchain(const std::string& device_path, const st
     std::string sector_file = device_path + "/vault_sectors.dat";
 
     if (!std::filesystem::exists(sector_file)) {
-        std::println(stderr, "{}Error: Sector file {} does not exist.{}", COLOR_RED, sector_file, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Sector file {} does not exist.{}", COLOR_RED, sector_file, COLOR_RESET);
         return "";
     }
 
@@ -392,7 +448,7 @@ std::string recover_key_from_blockchain(const std::string& device_path, const st
         VaultBlock block;
         if (read_block_from_sector(sector_file, sector, block)) {
             if (block.key_data_length < crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
-                std::println(stderr, "{}Error: Insufficient key data size in sector {} of file {}. Expected at least {} bytes, got {}.{}",
+                vaultguard::wallet::println(stderr, "{}Error: Insufficient key data size in sector {} of file {}. Expected at least {} bytes, got {}.{}",
                              COLOR_RED, sector, sector_file, crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES, block.key_data_length, COLOR_RESET);
                 continue;
             }
@@ -411,12 +467,12 @@ std::string recover_key_from_blockchain(const std::string& device_path, const st
                 crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
                 return key;
             } else {
-                std::println(stderr, "{}Error: Failed to decrypt key from sector {} in {}. Incorrect password or corrupted data.{}", COLOR_RED, sector, sector_file, COLOR_RESET);
+                vaultguard::wallet::println(stderr, "{}Error: Failed to decrypt key from sector {} in {}. Incorrect password or corrupted data.{}", COLOR_RED, sector, sector_file, COLOR_RESET);
             }
             crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
         }
     }
-    std::println(stderr, "{}Error: Failed to recover key from blockchain in {}. Check if the file exists and is accessible.{}", COLOR_RED, sector_file, COLOR_RESET);
+    vaultguard::wallet::println(stderr, "{}Error: Failed to recover key from blockchain in {}. Check if the file exists and is accessible.{}", COLOR_RED, sector_file, COLOR_RESET);
     return "";
 }
 
@@ -425,13 +481,13 @@ std::string recover_key_from_filesystem(const std::string& output_path, const st
     std::string key_file = output_path + "/vault_key.dat";
     std::ifstream in(key_file, std::ios::binary);
     if (!in) {
-        std::println(stderr, "{}Warning: Cannot open {} for reading (errno: {}). Fallback file not found, which is expected if blockchain storage succeeded.{}", COLOR_YELLOW, key_file, errno, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Warning: Cannot open {} for reading (errno: {}). Fallback file not found, which is expected if blockchain storage succeeded.{}", COLOR_YELLOW, key_file, errno, COLOR_RESET);
         return "";
     }
     std::vector<unsigned char> key_data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     in.close();
     if (key_data.size() < crypto_pwhash_SALTBYTES + crypto_secretbox_NONCEBYTES + crypto_secretbox_MACBYTES) {
-        std::println(stderr, "{}Error: Invalid key data in {}. File is too small or corrupted.{}", COLOR_RED, key_file, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Invalid key data in {}. File is too small or corrupted.{}", COLOR_RED, key_file, COLOR_RESET);
         return "";
     }
     std::vector<unsigned char> recovered_salt(key_data.begin(), key_data.begin() + crypto_pwhash_SALTBYTES);
@@ -450,28 +506,28 @@ std::string recover_key_from_filesystem(const std::string& output_path, const st
         return key;
     }
     crypto::secure_zero(derived_key, crypto_secretbox_KEYBYTES);
-    std::println(stderr, "{}Error: Failed to decrypt key from {}. Incorrect password or corrupted file.{}", COLOR_RED, key_file, COLOR_RESET);
+    vaultguard::wallet::println(stderr, "{}Error: Failed to decrypt key from {}. Incorrect password or corrupted file.{}", COLOR_RED, key_file, COLOR_RESET);
     return "";
 }
 
 // Display startup banner
 void display_banner() {
-    std::println("{}", COLOR_CYAN);
-    std::println("----------------------------------------");
-    std::println("VaultGuard v{}", VERSION);
-    std::println("Secure Wallet Storage and Recovery");
-    std::println("Author: {}", AUTHOR);
-    std::println("Description: Securely store and recover cryptocurrency wallets (private keys and seed phrases) on an encrypted USB drive.");
-    std::println("----------------------------------------{}", COLOR_RESET);
-    std::println("{}", COLOR_YELLOW);
-    std::println("WARNING: Run this program OFFLINE on a trusted system or live USB (e.g., Tails) for maximum security.");
-    std::println("Do NOT run on a system with potential malware or keyloggers.");
-    std::println("Ensure a USB drive is connected before proceeding.{}", COLOR_RESET);
+    vaultguard::wallet::println("{}", COLOR_CYAN);
+    vaultguard::wallet::println("----------------------------------------");
+    vaultguard::wallet::println("VaultGuard v{}", VERSION);
+    vaultguard::wallet::println("Secure Wallet Storage and Recovery");
+    vaultguard::wallet::println("Author: {}", AUTHOR);
+    vaultguard::wallet::println("Description: Securely store and recover cryptocurrency wallets (private keys and seed phrases) on an encrypted USB drive.");
+    vaultguard::wallet::println("----------------------------------------{}", COLOR_RESET);
+    vaultguard::wallet::println("{}", COLOR_YELLOW);
+    vaultguard::wallet::println("WARNING: Run this program OFFLINE on a trusted system or live USB (e.g., Tails) for maximum security.");
+    vaultguard::wallet::println("Do NOT run on a system with potential malware or keyloggers.");
+    vaultguard::wallet::println("Ensure a USB drive is connected before proceeding.{}", COLOR_RESET);
 }
 
 // Check if a directory is writable
 bool is_writable(const std::filesystem::path& dir) {
-    const std::string nonce = std::format("{}_{}", std::time(nullptr), static_cast<long long>(::getpid()));
+    const std::string nonce = std::format("{}_{}", std::time(nullptr), static_cast<long long>(current_process_id()));
     std::filesystem::path test_file = dir / (".vaultguard_write_test_" + nonce);
     std::ofstream test(test_file);
     if (!test) {
@@ -486,7 +542,7 @@ bool is_writable(const std::filesystem::path& dir) {
 // Get secure input with hidden characters
 std::string get_secure_input(const std::string& prompt) {
     if (!prompt.empty()) {
-        std::print("{}{}: {}", COLOR_CYAN, prompt, COLOR_RESET);
+        vaultguard::wallet::println("{}{}: {}", COLOR_CYAN, prompt, COLOR_RESET);
         std::fflush(stdout);
     }
 
@@ -512,7 +568,7 @@ std::string get_secure_input(const std::string& prompt) {
 #elif defined(_WIN32)
     SetConsoleMode(hStdin, mode);
 #endif
-    std::println("");  // Newline after input
+    vaultguard::wallet::println("");  // Newline after input
     return input;
 }
 
@@ -537,11 +593,11 @@ struct UsbDevice {
 std::vector<UsbDevice> list_usb_drives() {
     std::vector<UsbDevice> devices;
 #ifdef __APPLE__
-    FILE* pipe = popen("diskutil list external | awk 'BEGIN { disk = \"\" } /^ *\\/dev\\/disk[0-9]+ \\(external, physical\\)/ { disk = $1; next } /^[[:space:]]+[0-9]+:/ { if ($2 ~ /Apple_APFS|Apple_HFS|Windows_NTFS|DOS_FAT_32/) { size = $(NF-2) \" \" $(NF-1); gsub(/\\+/, \"\", size); vol = \"\"; for (i=3; i<=NF-3; ++i) vol = vol \" \" $i; gsub(/^ +| +$/, \"\", vol); if (vol != \"\" && vol != \"EFI\" && size !~ /MB/) { printf \"%s \\\"%s\\\" %s\\n\", disk, vol, size } } }'", "r");
+    FILE* pipe = open_command_pipe("diskutil list external | awk 'BEGIN { disk = \"\" } /^ *\\/dev\\/disk[0-9]+ \\(external, physical\\)/ { disk = $1; next } /^[[:space:]]+[0-9]+:/ { if ($2 ~ /Apple_APFS|Apple_HFS|Windows_NTFS|DOS_FAT_32/) { size = $(NF-2) \" \" $(NF-1); gsub(/\\+/, \"\", size); vol = \"\"; for (i=3; i<=NF-3; ++i) vol = vol \" \" $i; gsub(/^ +| +$/, \"\", vol); if (vol != \"\" && vol != \"EFI\" && size !~ /MB/) { printf \"%s \\\"%s\\\" %s\\n\", disk, vol, size } } }'", "r");
 #elif defined(__linux__)
-    FILE* pipe = popen("lsblk -d -o NAME,SIZE,LABEL | grep -v 'loop\\|sda\\|nvme'", "r");
+    FILE* pipe = open_command_pipe("lsblk -d -o NAME,SIZE,LABEL | grep -v 'loop\\|sda\\|nvme'", "r");
 #elif defined(_WIN32)
-    FILE* pipe = popen("powershell -Command \"Get-Disk | Where-Object {$_.BusType -eq 'USB'} | Select-Object Number,@{Name='Size';Expression={[math]::Round($_.Size/1GB,2) + ' GB'}},FriendlyName | Format-Table -AutoSize | Out-String\"", "r");
+    FILE* pipe = open_command_pipe("powershell -Command \"Get-Disk | Where-Object {$_.BusType -eq 'USB'} | Select-Object Number,@{Name='Size';Expression={[math]::Round($_.Size/1GB,2) + ' GB'}},FriendlyName | Format-Table -AutoSize | Out-String\"", "r");
 #else
     throw std::runtime_error("Unsupported platform for listing USB drives");
 #endif
@@ -552,7 +608,7 @@ std::vector<UsbDevice> list_usb_drives() {
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         output += buffer;
     }
-    pclose(pipe);
+    close_command_pipe(pipe);
 
     std::istringstream iss(output);
     std::string line;
@@ -576,8 +632,8 @@ std::vector<UsbDevice> list_usb_drives() {
 
     if (devices.empty()) {
         if (utils::is_debug_enabled()) {
-            std::println(stderr, "{}Debug: Raw output from diskutil list external:\n{}", COLOR_RED, output);
-            std::println(stderr, "{}", COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Debug: Raw output from diskutil list external:\n{}", COLOR_RED, output);
+            vaultguard::wallet::println(stderr, "{}", COLOR_RESET);
         }
     }
 
@@ -605,60 +661,60 @@ std::string get_apfs_volume_path(const std::string& device_path) {
 // Format USB drive to APFS (non-encrypted)
 bool format_usb_drive(const std::string& device_path, const std::string& drive_name, const std::string& disk_name, const std::string& password, std::string& output_path) {
     if (!is_valid_device_path(device_path)) {
-        std::println(stderr, "{}ERROR: Invalid device path format: {}.{}", COLOR_RED, device_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}ERROR: Invalid device path format: {}.{}", COLOR_RED, device_path, COLOR_RESET);
         return false;
     }
     if (!is_valid_drive_name(drive_name)) {
-        std::println(stderr, "{}ERROR: Invalid drive name '{}'. Use only letters, digits, dot, dash, underscore (max 32).{}",
+        vaultguard::wallet::println(stderr, "{}ERROR: Invalid drive name '{}'. Use only letters, digits, dot, dash, underscore (max 32).{}",
                      COLOR_RED, drive_name, COLOR_RESET);
         return false;
     }
 
     if (is_system_disk(device_path)) {
-        std::println(stderr, "{}ERROR: Cannot format system disk: {}", COLOR_RED, device_path);
-        std::println(stderr, "{}", COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}ERROR: Cannot format system disk: {}", COLOR_RED, device_path);
+        vaultguard::wallet::println(stderr, "{}", COLOR_RESET);
         return false;
     }
 
-    std::println("{}", COLOR_YELLOW);
-    std::println("WARNING: Formatting {} (Disk Name: {}) to APFS will ERASE ALL DATA. This cannot be undone!", device_path, disk_name);
-    std::println("{}", COLOR_RESET);
-    std::println("Selected device: {} ({})", disk_name, device_path);
-    std::print("{}Type the Device Path ({}) to confirm (or type 'cancel' to return): {}", COLOR_CYAN, device_path, COLOR_RESET);
+    vaultguard::wallet::println("{}", COLOR_YELLOW);
+    vaultguard::wallet::println("WARNING: Formatting {} (Disk Name: {}) to APFS will ERASE ALL DATA. This cannot be undone!", device_path, disk_name);
+    vaultguard::wallet::println("{}", COLOR_RESET);
+    vaultguard::wallet::println("Selected device: {} ({})", disk_name, device_path);
+    vaultguard::wallet::print("{}Type the Device Path ({}) to confirm (or type 'cancel' to return): {}", COLOR_CYAN, device_path, COLOR_RESET);
     std::string confirm_path;
     std::getline(std::cin, confirm_path);
     if (confirm_path == "cancel") {
-        std::println("{}Formatting cancelled.{}", COLOR_CYAN, COLOR_RESET);
+        vaultguard::wallet::println("{}Formatting cancelled.{}", COLOR_CYAN, COLOR_RESET);
         return false;
     }
     if (confirm_path != device_path) {
-        std::println(stderr, "{}Device Path mismatch. Formatting cancelled.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Device Path mismatch. Formatting cancelled.{}", COLOR_RED, COLOR_RESET);
         return false;
     }
 
-    std::print("{}Type 'YES' to confirm formatting (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
+    vaultguard::wallet::print("{}Type 'YES' to confirm formatting (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
     std::string confirm;
     std::getline(std::cin, confirm);
     if (confirm == "cancel") {
-        std::println("{}Formatting cancelled.{}", COLOR_CYAN, COLOR_RESET);
+        vaultguard::wallet::println("{}Formatting cancelled.{}", COLOR_CYAN, COLOR_RESET);
         return false;
     }
     if (confirm != "YES") {
-        std::println(stderr, "{}Formatting cancelled.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Formatting cancelled.{}", COLOR_RED, COLOR_RESET);
         return false;
     }
 
     // Unmount disk
     std::string command = std::format("diskutil unmountDisk {}", shell_quote(device_path));
     if (std::system(command.c_str()) != 0) {
-        std::println(stderr, "{}Failed to unmount disk: {}.{}", COLOR_RED, device_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Failed to unmount disk: {}.{}", COLOR_RED, device_path, COLOR_RESET);
         return false;
     }
 
     // Erase and format disk to APFS
     command = std::format("diskutil eraseDisk APFS {} {}", shell_quote(drive_name), shell_quote(device_path));
     if (std::system(command.c_str()) != 0) {
-        std::println(stderr, "{}Failed to erase disk: {}.{}", COLOR_RED, device_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Failed to erase disk: {}.{}", COLOR_RED, device_path, COLOR_RESET);
         return false;
     }
 
@@ -667,9 +723,9 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
 
     // Get full diskutil list output for debug
     command = "diskutil list";
-    FILE* pipe = popen(command.c_str(), "r");
+    FILE* pipe = open_command_pipe(command.c_str(), "r");
     if (!pipe) {
-        std::println(stderr, "{}Failed to execute diskutil list.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Failed to execute diskutil list.{}", COLOR_RED, COLOR_RESET);
         return false;
     }
     char buffer[256];
@@ -677,37 +733,37 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         full_list_output += buffer;
     }
-    pclose(pipe);
+    close_command_pipe(pipe);
 
     // Find APFS container ID
     std::string device_id = device_path.substr(device_path.find_last_of('/') + 1); // Extract disk6 from /dev/disk6
     if (!std::regex_match(device_id, std::regex(R"(^disk[0-9]+$)"))) {
-        std::println(stderr, "{}Error: Unexpected device id {}.{}", COLOR_RED, device_id, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Unexpected device id {}.{}", COLOR_RED, device_id, COLOR_RESET);
         return false;
     }
     command = std::format("diskutil list | grep 'Apple_APFS Container' | grep {}s2 | awk '{{print $4}}'", device_id);
-    pipe = popen(command.c_str(), "r");
+    pipe = open_command_pipe(command.c_str(), "r");
     if (!pipe) {
-        std::println(stderr, "{}Failed to list APFS containers for {}.{}", COLOR_RED, device_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Failed to list APFS containers for {}.{}", COLOR_RED, device_path, COLOR_RESET);
         return false;
     }
     std::string result;
     while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
         result += buffer;
     }
-    pclose(pipe);
+    close_command_pipe(pipe);
     trim_trailing_newlines(result);
     std::string container_id = result.empty() ? "" : "/dev/" + result;
     if (container_id.empty()) {
-        std::println(stderr, "{}Error: Failed to find APFS container device. Full diskutil list output:\n{}", COLOR_RED, full_list_output, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to find APFS container device. Full diskutil list output:\n{}", COLOR_RED, full_list_output, COLOR_RESET);
         return false;
     }
 
     // Find mount path
     command = std::format("diskutil apfs list {} | grep 'Mount Point' | awk '{{print $4}}' | head -n 1", shell_quote(container_id));
-    pipe = popen(command.c_str(), "r");
+    pipe = open_command_pipe(command.c_str(), "r");
     if (!pipe) {
-        std::println(stderr, "{}Error: Failed to find mount point for {}.{}", COLOR_RED, container_id, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to find mount point for {}.{}", COLOR_RED, container_id, COLOR_RESET);
         return false;
     }
     result.clear();
@@ -715,19 +771,19 @@ bool format_usb_drive(const std::string& device_path, const std::string& drive_n
         result = buffer;
         trim_trailing_newlines(result);
     }
-    pclose(pipe);
+    close_command_pipe(pipe);
     output_path = result.empty() ? "/Volumes/" + drive_name : result;
     std::filesystem::path output_dir(output_path);
     if (!std::filesystem::exists(output_dir) || !std::filesystem::is_directory(output_dir)) {
-        std::println(stderr, "{}Error: Mount path {} not found. Please mount the volume manually.{}", COLOR_RED, output_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Mount path {} not found. Please mount the volume manually.{}", COLOR_RED, output_path, COLOR_RESET);
         return false;
     }
 
-    std::println("{}", COLOR_GREEN);
-    std::println("USB drive formatted successfully as {} (APFS). Your digital vault is ready! 🔒", drive_name);
-    std::println("{}", COLOR_RESET);
+    vaultguard::wallet::println("{}", COLOR_GREEN);
+    vaultguard::wallet::println("USB drive formatted successfully as {} (APFS). Your digital vault is ready! 🔒", drive_name);
+    vaultguard::wallet::println("{}", COLOR_RESET);
     if (!store_key_in_blockchain(device_path, password, password, output_path)) {
-        std::println(stderr, "{}Error: Failed to initialize vault key metadata on formatted drive.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to initialize vault key metadata on formatted drive.{}", COLOR_RED, COLOR_RESET);
         return false;
     }
     return true;
@@ -748,17 +804,17 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
                  const std::string& password, const std::string& device_path) {
     (void)device_path;
     if (!is_valid_wallet_id(wallet_id)) {
-        std::println(stderr, "{}Error: Invalid wallet ID '{}'. Use letters, numbers, underscore, dash (max 64).{}",
+        vaultguard::wallet::println(stderr, "{}Error: Invalid wallet ID '{}'. Use letters, numbers, underscore, dash (max 64).{}",
                      COLOR_RED, wallet_id, COLOR_RESET);
         return;
     }
     std::filesystem::path output_dir(output_path);
     if (!std::filesystem::exists(output_dir)) {
-        std::println(stderr, "{}Error: Output directory does not exist: {}. Ensure the USB drive is mounted (e.g., /Volumes/VAULT) and the path is correct.{}", COLOR_RED, output_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Output directory does not exist: {}. Ensure the USB drive is mounted (e.g., /Volumes/VAULT) and the path is correct.{}", COLOR_RED, output_path, COLOR_RESET);
         return;
     }
     if (!std::filesystem::is_directory(output_dir) || !is_writable(output_dir)) {
-        std::println(stderr, "{}Error: Cannot write to output directory: {}. Check permissions or mount the USB drive correctly.{}", COLOR_RED, output_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Cannot write to output directory: {}. Check permissions or mount the USB drive correctly.{}", COLOR_RED, output_path, COLOR_RESET);
         return;
     }
 
@@ -806,7 +862,7 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
             crypto::secure_zero(loaded_key.data(), loaded_key.size());
             secure_zero_string(decrypted_index);
         } catch (const std::exception& e) {
-            std::println(stderr, "{}Error: Failed to load or decrypt index file: {}. Ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Failed to load or decrypt index file: {}. Ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
             return;
         }
     }
@@ -832,14 +888,14 @@ void save_wallet(const std::string& wallet_id, const std::string& private_key, c
     crypto::secure_zero(index_key.data(), index_key.size());
     secure_zero_string(index_str);
 
-    std::println("{}", COLOR_GREEN);
-    std::println("Wallet {} saved to {}. Your digital vault is secure! 🔒", wallet_id, wallet_file);
-    std::println("{}", COLOR_RESET);
+    vaultguard::wallet::println("{}", COLOR_GREEN);
+    vaultguard::wallet::println("Wallet {} saved to {}. Your digital vault is secure! 🔒", wallet_id, wallet_file);
+    vaultguard::wallet::println("{}", COLOR_RESET);
     if (utils::is_debug_enabled()) {
         if (std::filesystem::exists(wallet_file) && std::filesystem::exists(index_file)) {
-            std::println("{}Debug: Wallet file and index file successfully created.{}", COLOR_CYAN, COLOR_RESET);
+            vaultguard::wallet::println("{}Debug: Wallet file and index file successfully created.{}", COLOR_CYAN, COLOR_RESET);
         } else {
-            std::println(stderr, "{}Debug: Failed to verify wallet file or index file creation.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Debug: Failed to verify wallet file or index file creation.{}", COLOR_RED, COLOR_RESET);
         }
     }
 }
@@ -849,16 +905,16 @@ void recover_wallet(const std::string& output_path, const std::string& password,
     (void)device_path;
     std::string recovered_password = recover_key_from_blockchain(output_path, password);
     if (recovered_password.empty()) {
-        std::println("{}", COLOR_YELLOW);
-        std::println("Warning: Failed to recover key from blockchain. Trying filesystem fallback.{}", COLOR_RESET);
+        vaultguard::wallet::println("{}", COLOR_YELLOW);
+        vaultguard::wallet::println("Warning: Failed to recover key from blockchain. Trying filesystem fallback.{}", COLOR_RESET);
         recovered_password = recover_key_from_filesystem(output_path, password);
     }
     if (recovered_password.empty()) {
-        std::println(stderr, "{}Error: Failed to recover key from blockchain or filesystem. Please ensure the correct password is used and files exist.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to recover key from blockchain or filesystem. Please ensure the correct password is used and files exist.{}", COLOR_RED, COLOR_RESET);
         return;
     }
     if (!constant_time_equal(recovered_password, password)) {
-        std::println(stderr, "{}Error: Recovered password does not match provided password.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Recovered password does not match provided password.{}", COLOR_RED, COLOR_RESET);
         secure_zero_string(recovered_password);
         return;
     }
@@ -866,7 +922,7 @@ void recover_wallet(const std::string& output_path, const std::string& password,
 
     std::string index_file = output_path + "/vault_index.dat";
     if (!std::filesystem::exists(index_file)) {
-        std::println("{}No wallets found: Index file does not exist at {}. Please add a wallet first.{}", COLOR_RED, index_file, COLOR_RESET);
+        vaultguard::wallet::println("{}No wallets found: Index file does not exist at {}. Please add a wallet first.{}", COLOR_RED, index_file, COLOR_RESET);
         return;
     }
 
@@ -898,25 +954,25 @@ void recover_wallet(const std::string& output_path, const std::string& password,
         crypto::secure_zero(loaded_key.data(), loaded_key.size());
         secure_zero_string(decrypted_index);
     } catch (const std::exception& e) {
-        std::println(stderr, "{}Error: Failed to decrypt or parse index file: {}. Please ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to decrypt or parse index file: {}. Please ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
         return;
     }
 
     if (wallets.empty()) {
-        std::println("{}No wallets found in index. Please add a wallet first.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println("{}No wallets found in index. Please add a wallet first.{}", COLOR_RED, COLOR_RESET);
         return;
     }
 
-    std::println("Available wallets:");
+    vaultguard::wallet::println("Available wallets:");
     for (size_t i = 0; i < wallets.size(); ++i) {
-        std::println("[{}] Wallet ID: {}, Name: {}, Currency: {}", i + 1, wallets[i].wallet_id, wallets[i].name, wallets[i].currency);
+        vaultguard::wallet::println("[{}] Wallet ID: {}, Name: {}, Currency: {}", i + 1, wallets[i].wallet_id, wallets[i].name, wallets[i].currency);
     }
-    std::print("{}Select a wallet by number (1-{}) or type 'cancel' to return to main menu: {}", COLOR_CYAN, wallets.size(), COLOR_RESET);
+    vaultguard::wallet::print("{}Select a wallet by number (1-{}) or type 'cancel' to return to main menu: {}", COLOR_CYAN, wallets.size(), COLOR_RESET);
     std::string choice;
     std::getline(std::cin, choice);
     if (choice == "cancel" || choice.empty()) {
-        std::println("{}", COLOR_YELLOW);
-        std::println("Wallet selection cancelled. Returning to main menu.{}", COLOR_RESET);
+        vaultguard::wallet::println("{}", COLOR_YELLOW);
+        vaultguard::wallet::println("Wallet selection cancelled. Returning to main menu.{}", COLOR_RESET);
         return;
     }
 
@@ -924,23 +980,23 @@ void recover_wallet(const std::string& output_path, const std::string& password,
     try {
         wallet_index = std::stoul(choice);
         if (wallet_index < 1 || wallet_index > wallets.size()) {
-            std::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, wallets.size(), COLOR_RESET);
+            vaultguard::wallet::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, wallets.size(), COLOR_RESET);
             return;
         }
     } catch (...) {
-        std::println("{}Invalid input. Please enter a number or 'cancel'. Returning to main menu.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println("{}Invalid input. Please enter a number or 'cancel'. Returning to main menu.{}", COLOR_RED, COLOR_RESET);
         return;
     }
 
     const auto& selected_wallet = wallets[wallet_index - 1];
     if (!is_valid_wallet_id(selected_wallet.wallet_id) || !is_safe_wallet_data_file(selected_wallet.file)) {
-        std::println(stderr, "{}Error: Wallet metadata for selected entry is invalid or unsafe.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Wallet metadata for selected entry is invalid or unsafe.{}", COLOR_RED, COLOR_RESET);
         return;
     }
 
     std::string expected_file = "wallet_" + selected_wallet.wallet_id + ".dat";
     if (selected_wallet.file != expected_file) {
-        std::println(stderr, "{}Error: Wallet index integrity check failed for wallet {}.{}", COLOR_RED, selected_wallet.wallet_id, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Wallet index integrity check failed for wallet {}.{}", COLOR_RED, selected_wallet.wallet_id, COLOR_RESET);
         return;
     }
 
@@ -965,26 +1021,26 @@ void recover_wallet(const std::string& output_path, const std::string& password,
         crypto::secure_zero(wallet_key.data(), wallet_key.size());
         secure_zero_string(decrypted_wallet);
 
-        std::println("Recovery output mode:");
-        std::println("[1] Display once in terminal (no file)");
-        std::println("[2] Export plaintext file (higher risk)");
-        std::println("[3] Cancel");
-        std::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
+        vaultguard::wallet::println("Recovery output mode:");
+        vaultguard::wallet::println("[1] Display once in terminal (no file)");
+        vaultguard::wallet::println("[2] Export plaintext file (higher risk)");
+        vaultguard::wallet::println("[3] Cancel");
+        vaultguard::wallet::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
         std::string output_choice;
         std::getline(std::cin, output_choice);
 
         if (output_choice == "1") {
-            std::println("{}", COLOR_YELLOW);
-            std::println("Wallet ID: {}", wallet_id);
-            std::println("Private Key: {}", private_key);
-            std::println("Seed Phrase: {}", seed_phrase);
-            std::println("Displayed once. No plaintext file was created.");
-            std::println("{}", COLOR_RESET);
+            vaultguard::wallet::println("{}", COLOR_YELLOW);
+            vaultguard::wallet::println("Wallet ID: {}", wallet_id);
+            vaultguard::wallet::println("Private Key: {}", private_key);
+            vaultguard::wallet::println("Seed Phrase: {}", seed_phrase);
+            vaultguard::wallet::println("Displayed once. No plaintext file was created.");
+            vaultguard::wallet::println("{}", COLOR_RESET);
         } else if (output_choice == "2") {
             std::string output_file = output_path + "/decrypted_wallet_" + selected_wallet.wallet_id + ".txt";
             std::ofstream out_file(output_file, std::ios::out | std::ios::trunc);
             if (!out_file) {
-                std::println(stderr, "{}Error: Failed to open file for writing: {}.{}", COLOR_RED, output_file, COLOR_RESET);
+                vaultguard::wallet::println(stderr, "{}Error: Failed to open file for writing: {}.{}", COLOR_RED, output_file, COLOR_RESET);
                 secure_zero_string(wallet_id);
                 secure_zero_string(private_key);
                 secure_zero_string(seed_phrase);
@@ -996,7 +1052,7 @@ void recover_wallet(const std::string& output_path, const std::string& password,
             out_file.flush();
             if (!out_file) {
                 out_file.close();
-                std::println(stderr, "{}Error: Failed while writing wallet data to {}.{}", COLOR_RED, output_file, COLOR_RESET);
+                vaultguard::wallet::println(stderr, "{}Error: Failed while writing wallet data to {}.{}", COLOR_RED, output_file, COLOR_RESET);
                 secure_zero_string(wallet_id);
                 secure_zero_string(private_key);
                 secure_zero_string(seed_phrase);
@@ -1011,18 +1067,18 @@ void recover_wallet(const std::string& output_path, const std::string& password,
                 std::filesystem::perm_options::replace,
                 permissions_error);
             if (permissions_error) {
-                std::println(stderr, "{}Warning: Failed to enforce strict permissions on {}: {}.{}",
+                vaultguard::wallet::println(stderr, "{}Warning: Failed to enforce strict permissions on {}: {}.{}",
                              COLOR_YELLOW, output_file, permissions_error.message(), COLOR_RESET);
             }
 
-            std::println("{}", COLOR_GREEN);
-            std::println("Decrypted data for {} saved to {}.", wallet_id, output_file);
-            std::println("Treat this plaintext file as highly sensitive and delete it as soon as possible.");
-            std::println("{}", COLOR_RESET);
+            vaultguard::wallet::println("{}", COLOR_GREEN);
+            vaultguard::wallet::println("Decrypted data for {} saved to {}.", wallet_id, output_file);
+            vaultguard::wallet::println("Treat this plaintext file as highly sensitive and delete it as soon as possible.");
+            vaultguard::wallet::println("{}", COLOR_RESET);
         } else {
-            std::println("{}", COLOR_YELLOW);
-            std::println("Recovery output cancelled.");
-            std::println("{}", COLOR_RESET);
+            vaultguard::wallet::println("{}", COLOR_YELLOW);
+            vaultguard::wallet::println("Recovery output cancelled.");
+            vaultguard::wallet::println("{}", COLOR_RESET);
             secure_zero_string(wallet_id);
             secure_zero_string(private_key);
             secure_zero_string(seed_phrase);
@@ -1033,7 +1089,7 @@ void recover_wallet(const std::string& output_path, const std::string& password,
         secure_zero_string(private_key);
         secure_zero_string(seed_phrase);
     } catch (const std::exception& e) {
-        std::println(stderr, "{}Error: Failed to decrypt or parse wallet file: {}. Please ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Failed to decrypt or parse wallet file: {}. Please ensure the correct password is used.{}", COLOR_RED, e.what(), COLOR_RESET);
         return;
     }
 }
@@ -1087,14 +1143,14 @@ bool find_existing_usb(std::string& output_path, std::string& password, std::str
         std::filesystem::path index_file = entry.path() / "vault_index.dat";
         if (std::filesystem::exists(index_file) && is_writable(entry.path())) {
             output_path = entry.path().string();
-            std::println("Found configured USB drive at {}", output_path);
-            std::print("{}Enter the password for this USB drive (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
+            vaultguard::wallet::println("Found configured USB drive at {}", output_path);
+            vaultguard::wallet::print("{}Enter the password for this USB drive (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
             password = get_secure_input("");
             if (password == "cancel") {
                 return false;
             }
             if (password.empty()) {
-                std::println("{}Password cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                vaultguard::wallet::println("{}Password cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                 return false;
             }
             try {
@@ -1106,7 +1162,7 @@ bool find_existing_usb(std::string& output_path, std::string& password, std::str
                 device_path = output_path; // Use output_path for file-based sectors
                 return true;
             } catch (const std::exception& e) {
-                std::println(stderr, "{}Error: Invalid password for {}: {}.{}", COLOR_RED, output_path, e.what(), COLOR_RESET);
+                vaultguard::wallet::println(stderr, "{}Error: Invalid password for {}: {}.{}", COLOR_RED, output_path, e.what(), COLOR_RESET);
                 return false;
             }
         }
@@ -1147,7 +1203,7 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
 
     std::vector<UsbDevice> devices = list_usb_drives();
     if (devices.empty()) {
-        std::println("{}ERROR: No USB drives detected. Press Enter to retry, or type 'cancel' to return:{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println("{}ERROR: No USB drives detected. Press Enter to retry, or type 'cancel' to return:{}", COLOR_RED, COLOR_RESET);
         std::string retry;
         std::getline(std::cin, retry);
         if (retry == "cancel") {
@@ -1156,37 +1212,37 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
         return select_or_format_usb(output_path, password, device_path);
     }
 
-    std::println("Available USB drives:");
+    vaultguard::wallet::println("Available USB drives:");
     for (size_t i = 0; i < devices.size(); ++i) {
-        std::println("[{}] Path: {}, Disk Name: {}, Size: {}", i + 1, devices[i].path, devices[i].name, devices[i].size);
+        vaultguard::wallet::println("[{}] Path: {}, Disk Name: {}, Size: {}", i + 1, devices[i].path, devices[i].name, devices[i].size);
     }
-    std::println("To find the correct Device Path, run 'diskutil list external' (macOS), 'lsblk' (Linux), or 'Get-Disk' (Windows) in a terminal.");
-    std::println("Device Path is the path of the USB drive as shown in the list above (e.g., '/dev/disk6').");
-    std::println("{}", COLOR_YELLOW);
-    std::println("WARNING: Select the correct USB device to avoid formatting critical disks (e.g., system drive)!{}", COLOR_RESET);
+    vaultguard::wallet::println("To find the correct Device Path, run 'diskutil list external' (macOS), 'lsblk' (Linux), or 'Get-Disk' (Windows) in a terminal.");
+    vaultguard::wallet::println("Device Path is the path of the USB drive as shown in the list above (e.g., '/dev/disk6').");
+    vaultguard::wallet::println("{}", COLOR_YELLOW);
+    vaultguard::wallet::println("WARNING: Select the correct USB device to avoid formatting critical disks (e.g., system drive)!{}", COLOR_RESET);
 
-    std::println("Select an option:");
-    std::println("[1] Format a USB drive (erases all data)");
-    std::println("[2] Use an existing USB drive");
-    std::println("[3] Cancel and return to main menu");
-    std::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
+    vaultguard::wallet::println("Select an option:");
+    vaultguard::wallet::println("[1] Format a USB drive (erases all data)");
+    vaultguard::wallet::println("[2] Use an existing USB drive");
+    vaultguard::wallet::println("[3] Cancel and return to main menu");
+    vaultguard::wallet::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
     std::string choice;
     std::getline(std::cin, choice);
     if (choice == "3" || choice == "cancel") {
         return false;
     }
     if (choice.empty()) {
-        std::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
         return select_or_format_usb(output_path, password, device_path);
     }
 
     if (choice == "1") {
         password = generate_secure_password();
-        std::println("{}", COLOR_GREEN);
-        std::println("Generated password (copy exactly):");
-        std::println("{}", password);
-        std::println("Please save this password securely (e.g., in a password manager or physical safe)!{}", COLOR_RESET);
-        std::print("{}If you prefer to use your own password, enter it now (at least 16 characters, including uppercase, lowercase, digits, and special characters), or press Enter to use the generated one (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
+        vaultguard::wallet::println("{}", COLOR_GREEN);
+        vaultguard::wallet::println("Generated password (copy exactly):");
+        vaultguard::wallet::println("{}", password);
+        vaultguard::wallet::println("Please save this password securely (e.g., in a password manager or physical safe)!{}", COLOR_RESET);
+        vaultguard::wallet::print("{}If you prefer to use your own password, enter it now (at least 16 characters, including uppercase, lowercase, digits, and special characters), or press Enter to use the generated one (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
         std::string user_password = get_secure_input("");
         if (user_password == "cancel") {
             return false;
@@ -1194,74 +1250,74 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
         if (!user_password.empty()) {
             if (is_strong_password(user_password)) {
                 password = user_password;
-                std::println("{}", COLOR_GREEN);
-                std::println("Custom password accepted. Please save it securely!{}", COLOR_RESET);
+                vaultguard::wallet::println("{}", COLOR_GREEN);
+                vaultguard::wallet::println("Custom password accepted. Please save it securely!{}", COLOR_RESET);
             } else {
-                std::println("{}Warning: Provided password is not strong enough. Using generated password instead: {}{}", COLOR_YELLOW, password, COLOR_RESET);
+                vaultguard::wallet::println("{}Warning: Provided password is not strong enough. Using generated password instead: {}{}", COLOR_YELLOW, password, COLOR_RESET);
             }
         }
         secure_zero_string(user_password);
 
-        std::print("{}Select a USB drive by number (1-{}) or type 'cancel' to return: {}", COLOR_CYAN, devices.size(), COLOR_RESET);
+        vaultguard::wallet::print("{}Select a USB drive by number (1-{}) or type 'cancel' to return: {}", COLOR_CYAN, devices.size(), COLOR_RESET);
         std::string device_choice;
         std::getline(std::cin, device_choice);
         if (device_choice == "cancel") {
             return false;
         }
         if (device_choice.empty()) {
-            std::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
+            vaultguard::wallet::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         size_t device_index;
         try {
             device_index = std::stoul(device_choice);
             if (device_index < 1 || device_index > devices.size()) {
-                std::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
+                vaultguard::wallet::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
                 return select_or_format_usb(output_path, password, device_path);
             }
         } catch (...) {
-            std::println("{}Invalid input. Please enter a number or 'cancel'.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println("{}Invalid input. Please enter a number or 'cancel'.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         UsbDevice selected_device = devices[device_index - 1];
         std::string format_device_path = selected_device.path; // Use device path for formatting
         std::string disk_name = selected_device.name;
-        std::print("{}Enter a new name for the USB drive (e.g., Cpz) or type 'cancel' to return: {}", COLOR_CYAN, COLOR_RESET);
+        vaultguard::wallet::print("{}Enter a new name for the USB drive (e.g., Cpz) or type 'cancel' to return: {}", COLOR_CYAN, COLOR_RESET);
         std::string drive_name = get_secure_input("");
         if (drive_name == "cancel") {
             return false;
         }
         if (drive_name.empty()) {
-            std::println("{}Drive name cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println("{}Drive name cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         device_path = "/Volumes/" + drive_name; // Use mount path for file-based sectors
         if (format_usb_drive(format_device_path, drive_name, disk_name, password, output_path)) {
             return true;
         } else {
-            std::println("{}Formatting failed. Please try again.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println("{}Formatting failed. Please try again.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
     } else if (choice == "2") {
-        std::print("{}Select a USB drive by number (1-{}) or type 'cancel' to return: {}", COLOR_CYAN, devices.size(), COLOR_RESET);
+        vaultguard::wallet::print("{}Select a USB drive by number (1-{}) or type 'cancel' to return: {}", COLOR_CYAN, devices.size(), COLOR_RESET);
         std::string device_choice;
         std::getline(std::cin, device_choice);
         if (device_choice == "cancel") {
             return false;
         }
         if (device_choice.empty()) {
-            std::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
+            vaultguard::wallet::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         size_t device_index;
         try {
             device_index = std::stoul(device_choice);
             if (device_index < 1 || device_index > devices.size()) {
-                std::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
+                vaultguard::wallet::println("{}Invalid selection. Please select a number between 1 and {}.{}", COLOR_RED, devices.size(), COLOR_RESET);
                 return select_or_format_usb(output_path, password, device_path);
             }
         } catch (...) {
-            std::println("{}Invalid input. Please enter a number or 'cancel'.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println("{}Invalid input. Please enter a number or 'cancel'.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         UsbDevice selected_device = devices[device_index - 1];
@@ -1269,57 +1325,57 @@ bool select_or_format_usb(std::string& output_path, std::string& password, std::
         std::string suggested_path = get_mount_path(disk_name);
         if (suggested_path.empty()) suggested_path = "/Volumes/VAULT";
 #ifdef __APPLE__
-        std::print("{}Enter mount path for existing USB (e.g., {}) or type 'cancel' to return: {}", COLOR_CYAN, suggested_path, COLOR_RESET);
+        vaultguard::wallet::print("{}Enter mount path for existing USB (e.g., {}) or type 'cancel' to return: {}", COLOR_CYAN, suggested_path, COLOR_RESET);
         output_path = get_secure_input("");
 #else
-        std::print("{}Enter mount path for existing USB (e.g., /mnt/{} or D:\\) or type 'cancel' to return: {}", COLOR_CYAN, disk_name, COLOR_RESET);
+        print("{}Enter mount path for existing USB (e.g., /mnt/{} or D:\\) or type 'cancel' to return: {}", COLOR_CYAN, disk_name, COLOR_RESET);
         output_path = get_secure_input("");
 #endif
         if (output_path == "cancel") {
             return false;
         }
         if (output_path.empty()) {
-            std::println("{}Mount path cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println("{}Mount path cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         device_path = output_path; // Use output_path for file-based sectors
-        std::print("{}Enter the password for this USB drive (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
+        vaultguard::wallet::print("{}Enter the password for this USB drive (or type 'cancel' to return): {}", COLOR_CYAN, COLOR_RESET);
         password = get_secure_input("");
         if (password == "cancel") {
             return false;
         }
         if (password.empty()) {
-            std::println("{}Password cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println("{}Password cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         std::string recovered_password = recover_key_from_blockchain(device_path, password);
         if (recovered_password.empty()) {
-            std::println("{}", COLOR_YELLOW);
-            std::println("Warning: Failed to recover key from blockchain. Trying filesystem fallback.{}", COLOR_RESET);
+            vaultguard::wallet::println("{}", COLOR_YELLOW);
+            vaultguard::wallet::println("Warning: Failed to recover key from blockchain. Trying filesystem fallback.{}", COLOR_RESET);
             recovered_password = recover_key_from_filesystem(output_path, password);
         }
         if (recovered_password.empty()) {
-            std::println(stderr, "{}Error: Failed to recover key from blockchain or filesystem. Please ensure the correct password is used and files exist.{}", COLOR_RED, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Failed to recover key from blockchain or filesystem. Please ensure the correct password is used and files exist.{}", COLOR_RED, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         if (!constant_time_equal(recovered_password, password)) {
             secure_zero_string(recovered_password);
-            std::println(stderr, "{}Error: Invalid password for {}.{}", COLOR_RED, output_path, COLOR_RESET);
+            vaultguard::wallet::println(stderr, "{}Error: Invalid password for {}.{}", COLOR_RED, output_path, COLOR_RESET);
             return select_or_format_usb(output_path, password, device_path);
         }
         secure_zero_string(recovered_password);
     } else {
-        std::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
+        vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
         return select_or_format_usb(output_path, password, device_path);
     }
 
     std::filesystem::path output_dir(output_path);
     if (!std::filesystem::exists(output_dir)) {
-        std::println(stderr, "{}Error: Output directory does not exist: {}. Ensure the USB drive is mounted (e.g., /Volumes/VAULT) and the path is correct.{}", COLOR_RED, output_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Output directory does not exist: {}. Ensure the USB drive is mounted (e.g., /Volumes/VAULT) and the path is correct.{}", COLOR_RED, output_path, COLOR_RESET);
         return false;
     }
     if (!std::filesystem::is_directory(output_dir) || !is_writable(output_dir)) {
-        std::println(stderr, "{}Error: Cannot write to output directory: {}. Check permissions or mount the USB drive correctly.{}", COLOR_RED, output_path, COLOR_RESET);
+        vaultguard::wallet::println(stderr, "{}Error: Cannot write to output directory: {}. Check permissions or mount the USB drive correctly.{}", COLOR_RED, output_path, COLOR_RESET);
         return false;
     }
 
@@ -1344,7 +1400,7 @@ void run() {
         if (usb_ready && !output_path.empty()) {
             std::filesystem::path output_dir(output_path);
             if (!std::filesystem::exists(output_dir) || !std::filesystem::is_directory(output_dir) || !is_writable(output_dir)) {
-                std::println(stderr, "{}Error: USB drive at {} is no longer accessible. Please reconfigure USB drive.{}", COLOR_RED, output_path, COLOR_RESET);
+                vaultguard::wallet::println(stderr, "{}Error: USB drive at {} is no longer accessible. Please reconfigure USB drive.{}", COLOR_RED, output_path, COLOR_RESET);
                 usb_ready = false;
                 output_path.clear();
                 secure_zero_string(password);
@@ -1352,42 +1408,42 @@ void run() {
                 continue;
             }
 
-            std::println("\nVaultGuard Menu (USB ready at {}):", output_path);
-            std::println("[1] Store an existing wallet");
-            std::println("[2] Recover stored wallets");
-            std::println("[3] Change USB drive");
-            std::println("[4] Exit");
-            std::print("{}Select an option (1-4): {}", COLOR_CYAN, COLOR_RESET);
+            vaultguard::wallet::println("\nVaultGuard Menu (USB ready at {}):", output_path);
+            vaultguard::wallet::println("[1] Store an existing wallet");
+            vaultguard::wallet::println("[2] Recover stored wallets");
+            vaultguard::wallet::println("[3] Change USB drive");
+            vaultguard::wallet::println("[4] Exit");
+            vaultguard::wallet::print("{}Select an option (1-4): {}", COLOR_CYAN, COLOR_RESET);
             std::fflush(stdout);
             std::string menu_choice;
             std::getline(std::cin, menu_choice);
             trim_trailing_newlines(menu_choice);
-            std::println("");
+            vaultguard::wallet::println("");
             if (menu_choice.empty()) {
-                std::println("{}Invalid option. Please select a number between 1 and 4.{}", COLOR_RED, COLOR_RESET);
+                vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 4.{}", COLOR_RED, COLOR_RESET);
                 continue;
             }
 
             if (menu_choice == "4") {
-                std::println("{}Program terminated.{}", COLOR_CYAN, COLOR_RESET);
+                vaultguard::wallet::println("{}Program terminated.{}", COLOR_CYAN, COLOR_RESET);
                 break;
             }
             if (menu_choice == "1") {
-                std::println("Store Wallet Menu:");
-                std::println("[1] Enter wallet manually");
-                std::println("[2] Read from file");
-                std::println("[3] Cancel and return to main menu");
-                std::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
+                vaultguard::wallet::println("Store Wallet Menu:");
+                vaultguard::wallet::println("[1] Enter wallet manually");
+                vaultguard::wallet::println("[2] Read from file");
+                vaultguard::wallet::println("[3] Cancel and return to main menu");
+                vaultguard::wallet::print("{}Select an option (1-3): {}", COLOR_CYAN, COLOR_RESET);
                 std::fflush(stdout);
                 std::string wallet_choice;
                 std::getline(std::cin, wallet_choice);
                 trim_trailing_newlines(wallet_choice);
-                std::println("");
+                vaultguard::wallet::println("");
                 if (wallet_choice == "3" || wallet_choice == "cancel") {
                     continue;
                 }
                 if (wallet_choice.empty()) {
-                    std::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
+                    vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
 
@@ -1396,11 +1452,11 @@ void run() {
                     continue;
                 }
                 if (wallet_id.empty()) {
-                    std::println("{}Wallet ID cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                    vaultguard::wallet::println("{}Wallet ID cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
                 if (!is_valid_wallet_id(wallet_id)) {
-                    std::println("{}Invalid wallet ID format. Use letters, numbers, '_' or '-' only (max 64).{}", COLOR_RED, COLOR_RESET);
+                    vaultguard::wallet::println("{}Invalid wallet ID format. Use letters, numbers, '_' or '-' only (max 64).{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
                 std::string name = get_secure_input("Enter wallet name (e.g., My BTC Wallet, GENY Wallet) or type 'cancel' to return");
@@ -1408,7 +1464,7 @@ void run() {
                     continue;
                 }
                 if (name.empty()) {
-                    std::println("{}Wallet name cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                    vaultguard::wallet::println("{}Wallet name cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
                 std::string currency = get_secure_input("Enter currency (e.g., BTC, ETH, GENY) or type 'cancel' to return");
@@ -1416,7 +1472,7 @@ void run() {
                     continue;
                 }
                 if (currency.empty()) {
-                    std::println("{}Currency cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                    vaultguard::wallet::println("{}Currency cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
                 std::string private_key, seed_phrase;
@@ -1427,7 +1483,7 @@ void run() {
                         continue;
                     }
                     if (private_key.empty()) {
-                        std::println("{}Private key cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                        vaultguard::wallet::println("{}Private key cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                         continue;
                     }
                     seed_phrase = get_secure_input("Enter seed phrase (or type 'cancel' to return)");
@@ -1435,7 +1491,7 @@ void run() {
                         continue;
                     }
                     if (seed_phrase.empty()) {
-                        std::println("{}Seed phrase cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                        vaultguard::wallet::println("{}Seed phrase cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                         continue;
                     }
                 } else if (wallet_choice == "2") {
@@ -1444,31 +1500,31 @@ void run() {
                         continue;
                     }
                     if (file_path.empty()) {
-                        std::println("{}File path cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
+                        vaultguard::wallet::println("{}File path cannot be empty. Please try again.{}", COLOR_RED, COLOR_RESET);
                         continue;
                     }
                     try {
                         std::string file_content = read_from_file(file_path);
                         size_t pos = file_content.find('\n');
                         if (pos == std::string::npos) {
-                            std::println(stderr, "{}Error: Invalid file format: expected private key and seed phrase on separate lines{}", COLOR_RED, COLOR_RESET);
+                            vaultguard::wallet::println(stderr, "{}Error: Invalid file format: expected private key and seed phrase on separate lines{}", COLOR_RED, COLOR_RESET);
                             continue;
                         }
                         private_key = file_content.substr(0, pos);
                         seed_phrase = file_content.substr(pos + 1);
                         if (private_key.empty() || seed_phrase.empty()) {
-                            std::println(stderr, "{}Error: Private key or seed phrase is empty in file{}", COLOR_RED, COLOR_RESET);
+                            vaultguard::wallet::println(stderr, "{}Error: Private key or seed phrase is empty in file{}", COLOR_RED, COLOR_RESET);
                             secure_zero_string(file_content);
                             continue;
                         }
                         secure_zero_string(file_content);
                     } catch (const std::exception& e) {
-                        std::println(stderr, "{}Error: Failed to read file: {}", COLOR_RED, e.what());
-                        std::println(stderr, "{}", COLOR_RESET);
+                        vaultguard::wallet::println(stderr, "{}Error: Failed to read file: {}", COLOR_RED, e.what());
+                        vaultguard::wallet::println(stderr, "{}", COLOR_RESET);
                         continue;
                     }
                 } else {
-                    std::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
+                    vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 3.{}", COLOR_RED, COLOR_RESET);
                     continue;
                 }
 
@@ -1483,25 +1539,25 @@ void run() {
                 secure_zero_string(password);
                 device_path.clear();
             } else {
-                std::println("{}Invalid option. Please select a number between 1 and 4.{}", COLOR_RED, COLOR_RESET);
+                vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 4.{}", COLOR_RED, COLOR_RESET);
             }
         } else {
-            std::println("\nVaultGuard Menu (No USB drive configured):");
-            std::println("[1] Prepare USB drive");
-            std::println("[2] Exit");
-            std::print("{}Select an option (1-2): {}", COLOR_CYAN, COLOR_RESET);
+            vaultguard::wallet::println("\nVaultGuard Menu (No USB drive configured):");
+            vaultguard::wallet::println("[1] Prepare USB drive");
+            vaultguard::wallet::println("[2] Exit");
+            vaultguard::wallet::print("{}Select an option (1-2): {}", COLOR_CYAN, COLOR_RESET);
             std::fflush(stdout);
             std::string menu_choice;
             std::getline(std::cin, menu_choice);
             trim_trailing_newlines(menu_choice);
-            std::println("");
+            vaultguard::wallet::println("");
             if (menu_choice.empty()) {
-                std::println("{}Invalid option. Please select a number between 1 and 2.{}", COLOR_RED, COLOR_RESET);
+                vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 2.{}", COLOR_RED, COLOR_RESET);
                 continue;
             }
 
             if (menu_choice == "2" || menu_choice == "cancel") {
-                std::println("{}Program terminated.{}", COLOR_CYAN, COLOR_RESET);
+                vaultguard::wallet::println("{}Program terminated.{}", COLOR_CYAN, COLOR_RESET);
                 break;
             }
             if (menu_choice == "1") {
@@ -1509,7 +1565,7 @@ void run() {
                     usb_ready = true;
                 }
             } else {
-                std::println("{}Invalid option. Please select a number between 1 and 2.{}", COLOR_RED, COLOR_RESET);
+                vaultguard::wallet::println("{}Invalid option. Please select a number between 1 and 2.{}", COLOR_RED, COLOR_RESET);
             }
         }
     }

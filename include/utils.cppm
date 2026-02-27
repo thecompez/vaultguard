@@ -1,15 +1,17 @@
-export module utils;
+module;
 
-import <cstdint>;
-import <vector>;
-import <string>;
-import <sstream>;
-import <iostream>;
-import <iomanip>;
-import <algorithm>;
-import <cstdlib>;
-import <string_view>;
-import <print>;
+#include <cstdint>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <iostream>
+#include <iomanip>
+#include <algorithm>
+#include <cstdlib>
+#include <string_view>
+#include <format>
+
+export module utils;
 
 export namespace vaultguard::utils {
     const std::string COLOR_CYAN = "\033[1;36m";
@@ -44,6 +46,6 @@ export namespace vaultguard::utils {
             ss << std::hex << std::setw(2) << std::setfill('0') << (int)buffer[i] << " ";
         }
         if (length > 32) ss << "...";
-        std::println(stderr, "{}Debug: {}{}", COLOR_CYAN, ss.str(), COLOR_RESET);
+        std::cerr << std::format("{}Debug: {}{}", COLOR_CYAN, ss.str(), COLOR_RESET) << '\n';
     }
 }
