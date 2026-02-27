@@ -44,3 +44,11 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vaultguard-macos
+          path: |
+            build/vaultguard
+            build/recover_key
