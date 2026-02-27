@@ -170,8 +170,23 @@ jobs:
         shell: pwsh
         run: |
           cmake --version
-          cl /Bv
-          if (Get-Command 7z -ErrorAction SilentlyContinue) { 7z | Select-String "7-Zip" | Select-Object -First 1 }
+
+          # VS / MSVC version (safe, no failing exit codes)
+          $vsver = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -property installationVersion) 2>$null
+          if ($vsver) { Write-Host "Visual Studio: $vsver" }
+
+          # Show where cl.exe is, then print version without failing the step
+          $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
+          if ($cl) {
+            Write-Host "cl.exe: $($cl.Source)"
+            cmd /c "cl /Bv" | Out-Host
+            # Some environments still return non-zero for cl commands; don't fail the job
+            $global:LASTEXITCODE = 0
+          }
+
+          $z = Get-Command 7z.exe -ErrorAction SilentlyContinue
+          if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
 
       # ---------------------------
       # Configure
