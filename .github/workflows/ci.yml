@@ -20,14 +20,15 @@ jobs:
           - os: macos-latest
             name: macos-x64
 
+          # Windows: use MSVC (cl.exe) via VS generator (best CMake modules support)
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
-            clang_target: x86_64-pc-windows-msvc
+            vs_arch: x64
           - os: windows-latest
             name: windows-arm64
             vcpkg_triplet: arm64-windows
-            clang_target: aarch64-pc-windows-msvc
+            vs_arch: ARM64
 
           - os: ubuntu-24.04
             name: linux-x64
@@ -59,21 +60,16 @@ jobs:
           sudo apt-get install -y zip libsodium-dev
           /home/linuxbrew/.linuxbrew/bin/brew install cmake ninja llvm
 
+      # Windows: drop LLVM here (we use MSVC cl.exe)
       - name: Install dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          choco install -y cmake llvm ninja 7zip
+          choco install -y cmake 7zip
           vcpkg install libsodium --triplet "${{ matrix.vcpkg_triplet }}"
-
-          $llvmBin = "C:\Program Files\LLVM\bin"
-          if (-not (Test-Path $llvmBin)) { throw "LLVM bin not found: $llvmBin" }
-          Add-Content $env:GITHUB_PATH $llvmBin
-
           cmake --version
-          clang-cl --version
 
-      # ✅ MSVC env for clang-cl
+      # ✅ Ensure MSVC environment
       - name: MSVC Dev Cmd (Windows)
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
@@ -133,29 +129,34 @@ jobs:
           -DCMAKE_CXX_COMPILER="${CXX}"
           -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ✅ Windows: disable modules scan so CMake can generate
+      # ✅ Windows: use VS generator + MSVC cl.exe (modules support is best here)
       - name: Configure project (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $target = "${{ matrix.clang_target }}"
+          $arch = "${{ matrix.vs_arch }}"
 
-          cmake -S . -B build -G Ninja `
-            -DBUILD_TESTING=ON `
-            -DCMAKE_BUILD_TYPE=Release `
+          $testing = "ON"
+          if ("${{ matrix.name }}" -eq "windows-arm64") { $testing = "OFF" }
+
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" -A $arch `
+            -DBUILD_TESTING=$testing `
+            -DCMAKE_CONFIGURATION_TYPES="Release" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
             -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
-            -DCMAKE_C_COMPILER=clang-cl `
-            -DCMAKE_CXX_COMPILER=clang-cl `
-            -DCMAKE_C_FLAGS="--target=$target" `
-            -DCMAKE_CXX_FLAGS="--target=$target /std:c++latest /EHsc" `
-            -DCMAKE_CXX_SCAN_FOR_MODULES=OFF
+            -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
       # ---------------------------
       # Build
       # ---------------------------
 
-      - name: Build
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: cmake --build build --parallel --config Release
+
+      - name: Build (macOS/Linux)
+        if: runner.os != 'Windows'
         run: cmake --build build --parallel --config Release
 
       # ---------------------------
@@ -163,7 +164,7 @@ jobs:
       # ---------------------------
 
       - name: Test
-        if: runner.os == 'macOS' || (runner.os == 'Windows' && matrix.name != 'windows-arm64')
+        if: runner.os == 'macOS' || (runner.os == 'Windows' && matrix.name == 'windows-x64')
         run: ctest --test-dir build --output-on-failure -C Release
 
       # ---------------------------
@@ -179,14 +180,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          if (Test-Path "build\vaultguard.exe") { Copy-Item "build\vaultguard.exe" "vaultguard.exe" -Force }
-          elseif (Test-Path "build\Release\vaultguard.exe") { Copy-Item "build\Release\vaultguard.exe" "vaultguard.exe" -Force }
-          else { throw "vaultguard.exe not found in build output." }
-
-          if (Test-Path "build\recover_key.exe") { Copy-Item "build\recover_key.exe" "recover_key.exe" -Force }
-          elseif (Test-Path "build\Release\recover_key.exe") { Copy-Item "build\Release\recover_key.exe" "recover_key.exe" -Force }
-          else { throw "recover_key.exe not found in build output." }
-
+          Copy-Item "build\Release\vaultguard.exe" "vaultguard.exe" -Force
+          Copy-Item "build\Release\recover_key.exe" "recover_key.exe" -Force
           7z a "${{ matrix.name }}.zip" vaultguard.exe recover_key.exe
 
       - name: Package artifacts (Linux)
