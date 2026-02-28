@@ -20,7 +20,6 @@ jobs:
           - os: macos-latest
             name: macos-x64
 
-          # Windows: MSVC (cl.exe) via VS generator
           - os: windows-latest
             name: windows-x64
             vcpkg_triplet: x64-windows
@@ -34,19 +33,14 @@ jobs:
             vcpkg_triplet: x86-windows
             vs_arch: Win32
 
-          # Linux
           - os: ubuntu-24.04
             name: linux-x86
-            linux_arch: x86
           - os: ubuntu-24.04
             name: linux-x64
           - os: ubuntu-24.04-arm
             name: linux-arm64
-
-          # Linux ARMv7 (armhf) via cross-compile (brew LLVM)
           - os: ubuntu-24.04
             name: linux-armv7
-            linux_arch: armv7
 
     permissions:
       contents: write
@@ -59,15 +53,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ---------------------------
-      # CMake (Pinned)
-      # ---------------------------
-      - name: Install CMake ${{ env.CMAKE_VERSION }} (macOS/Linux)
+      - name: Install CMake (macOS/Linux)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-
           ver="${CMAKE_VERSION}"
           os="$(uname -s)"
           arch="$(uname -m)"
@@ -84,8 +74,6 @@ jobs:
           fi
 
           url="https://github.com/Kitware/CMake/releases/download/v${ver}/${pkg}"
-          echo "Downloading: $url"
-
           dst="${RUNNER_TEMP}/cmake"
           rm -rf "$dst"
           mkdir -p "$dst"
@@ -96,7 +84,7 @@ jobs:
           echo "${dst}/bin" >> "$GITHUB_PATH"
           cmake --version
 
-      - name: Install CMake ${{ env.CMAKE_VERSION }} (Windows)
+      - name: Install CMake (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -104,9 +92,6 @@ jobs:
           refreshenv
           cmake --version
 
-      # ---------------------------
-      # Dependencies
-      # ---------------------------
       - name: Install dependencies (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -119,9 +104,17 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [ "${{ matrix.name }}" = "linux-armv7" ]; then
-            # Keep host sources amd64-only and add ports sources for armhf
-            # (avoids security.ubuntu.com armhf 404 on Noble)
+          # Host deps
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zip pkg-config
+
+          if [ "${{ matrix.name }}" = "linux-x86" ]; then
+            sudo apt-get install -y --no-install-recommends gcc-multilib g++-multilib libc6-dev-i386
+            sudo dpkg --add-architecture i386
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libsodium-dev:i386
+          elif [ "${{ matrix.name }}" = "linux-armv7" ]; then
+            # Add armhf packages from Ubuntu Ports (avoid security.ubuntu.com armhf 404)
             sudo dpkg --add-architecture armhf
 
             sudo tee /etc/apt/sources.list >/dev/null <<'EOF'
@@ -139,22 +132,12 @@ deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main univer
 EOF
 
             sudo apt-get update
-            sudo apt-get install -y --no-install-recommends zip pkg-config \
+            sudo apt-get install -y --no-install-recommends \
               libc6-dev:armhf linux-libc-dev:armhf \
               libstdc++-13-dev:armhf libgcc-13-dev:armhf \
               libsodium-dev:armhf
-
           else
-            sudo apt-get update
-
-            if [ "${{ matrix.name }}" = "linux-x86" ]; then
-              sudo apt-get install -y zip gcc-multilib g++-multilib libc6-dev-i386 pkg-config
-              sudo dpkg --add-architecture i386
-              sudo apt-get update
-              sudo apt-get install -y libsodium-dev:i386
-            else
-              sudo apt-get install -y zip libsodium-dev
-            fi
+            sudo apt-get install -y --no-install-recommends libsodium-dev
           fi
 
           /home/linuxbrew/.linuxbrew/bin/brew install ninja llvm
@@ -172,15 +155,11 @@ EOF
         with:
           arch: ${{ matrix.name == 'windows-arm64' && 'amd64_arm64' || (matrix.name == 'windows-x86' && 'amd64_x86' || 'amd64') }}
 
-      # ---------------------------
-      # Toolchain: brew LLVM (macOS + Linux)
-      # ---------------------------
-      - name: Configure LLVM toolchain (macOS and Linux)
+      - name: Configure LLVM toolchain (macOS/Linux)
         if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-
           BREW_CMD="brew"
           if [ "${{ runner.os }}" = "Linux" ]; then
             BREW_CMD="/home/linuxbrew/.linuxbrew/bin/brew"
@@ -193,17 +172,10 @@ EOF
           echo "${LLVM_PREFIX}/bin" >> "$GITHUB_PATH"
 
           if [ "${{ runner.os }}" = "macOS" ]; then
-            LIBCXX_DIR="${LLVM_PREFIX}/lib/c++"
             SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
             echo "SDKROOT=${SDKROOT}" >> "$GITHUB_ENV"
-            echo "CFLAGS=-isysroot ${SDKROOT}" >> "$GITHUB_ENV"
-            echo "CXXFLAGS=-isysroot ${SDKROOT} -stdlib=libc++ -fexperimental-library" >> "$GITHUB_ENV"
-            echo "LDFLAGS=-isysroot ${SDKROOT} -L${LIBCXX_DIR} -Wl,-rpath,${LIBCXX_DIR}" >> "$GITHUB_ENV"
           fi
 
-      # ---------------------------
-      # Versions
-      # ---------------------------
       - name: Tool versions (macOS/Linux)
         if: runner.os != 'Windows'
         shell: bash
@@ -211,32 +183,15 @@ EOF
           echo "cmake: $(cmake --version | head -n 1)"
           echo "clang: $(clang++ --version | head -n 1)"
           echo "ninja: $(ninja --version || true)"
-          if [ "${{ runner.os }}" = "Linux" ]; then
-            dpkg -l | grep -E 'libsodium-dev|zip|armhf|i386' || true
-          fi
 
       - name: Tool versions (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           cmake --version
-          $vsver = (& "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
-            -latest -products * -property installationVersion) 2>$null
-          if ($vsver) { Write-Host "Visual Studio: $vsver" }
-
           $cl = Get-Command cl.exe -ErrorAction SilentlyContinue
-          if ($cl) {
-            Write-Host "cl.exe: $($cl.Source)"
-            cmd /c "cl /Bv" | Out-Host
-            $global:LASTEXITCODE = 0
-          }
+          if ($cl) { cmd /c "cl /Bv" | Out-Host; $global:LASTEXITCODE = 0 }
 
-          $z = Get-Command 7z.exe -ErrorAction SilentlyContinue
-          if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
-
-      # ---------------------------
-      # Configure
-      # ---------------------------
       - name: Configure project (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -259,7 +214,6 @@ EOF
             SYSROOT="/usr/arm-linux-gnueabihf"
             TARGET="arm-linux-gnueabihf"
             SCAN_DEPS="${LLVM_PREFIX}/bin/clang-scan-deps"
-
             test -x "${SCAN_DEPS}" || { echo "Missing: ${SCAN_DEPS}"; exit 1; }
 
             cmake -S . -B build -G Ninja \
@@ -276,11 +230,7 @@ EOF
               -DCMAKE_CXX_FLAGS="--target=${TARGET} --sysroot=${SYSROOT}" \
               -DCMAKE_EXE_LINKER_FLAGS="--target=${TARGET} --sysroot=${SYSROOT} -fuse-ld=lld" \
               -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS="${SCAN_DEPS}" \
-              -DCMAKE_CXX_SCAN_FOR_MODULES=ON \
-              -DCMAKE_FIND_ROOT_PATH="${SYSROOT};/usr/lib/${TARGET};/usr/include" \
-              -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-              -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-              -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+              -DCMAKE_CXX_SCAN_FOR_MODULES=ON
             exit 0
           fi
 
@@ -313,9 +263,6 @@ EOF
             -DVCPKG_TARGET_TRIPLET=${{ matrix.vcpkg_triplet }} `
             -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-      # ---------------------------
-      # Build
-      # ---------------------------
       - name: Build (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -326,17 +273,11 @@ EOF
         shell: bash
         run: cmake --build build --parallel --config Release
 
-      # ---------------------------
-      # Test
-      # ---------------------------
       - name: Test
         if: runner.os == 'macOS' || (runner.os == 'Windows' && matrix.name == 'windows-x64')
         shell: bash
         run: ctest --test-dir build --output-on-failure -C Release
 
-      # ---------------------------
-      # Package
-      # ---------------------------
       - name: Package artifacts (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -357,9 +298,6 @@ EOF
         run: |
           zip -j ${{ matrix.name }}.zip build/vaultguard build/recover_key
 
-      # ---------------------------
-      # Upload + Release
-      # ---------------------------
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
