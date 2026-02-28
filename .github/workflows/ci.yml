@@ -211,42 +211,42 @@ jobs:
           $z = Get-Command 7z.exe -ErrorAction SilentlyContinue
           if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
 
-- name: Build + package in ARMv7 container (linux-armv7)
-  if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
-  shell: bash
-  run: |
-    set -euo pipefail
+      - name: Build + package in ARMv7 container (linux-armv7)
+        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        shell: bash
+        run: |
+          set -euo pipefail
 
-    docker run --rm --platform linux/arm/v7 \
-      -v "$PWD:/src" -w /src \
-      arm32v7/ubuntu:24.04 bash -lc '
-        set -euo pipefail
-        export DEBIAN_FRONTEND=noninteractive
+          docker run --rm --platform linux/arm/v7 \
+            -v "$PWD:/src" -w /src \
+            arm32v7/ubuntu:24.04 bash -lc '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
 
-        apt-get update
-        apt-get install -y --no-install-recommends \
-          ca-certificates curl git ninja-build zip \
-          libsodium-dev cmake \
-          clang lld
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl git ninja-build zip \
+                libsodium-dev cmake \
+                clang lld
 
-        # Make sure we are actually using clang (parity with linux-x86/linux-x64)
-        clang --version | head -n 1
-        clang++ --version | head -n 1
-        cmake --version | head -n 1
-        ninja --version || true
+              # Make sure we are actually using clang (parity with linux-x86/linux-x64)
+              clang --version | head -n 1
+              clang++ --version | head -n 1
+              cmake --version | head -n 1
+              ninja --version || true
 
-        cmake -S . -B build -G Ninja \
-          -DCMAKE_BUILD_TYPE=Release \
-          -DBUILD_TESTING=OFF \
-          -DCMAKE_C_COMPILER=clang \
-          -DCMAKE_CXX_COMPILER=clang++ \
-          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
+              cmake -S . -B build -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_C_COMPILER=clang \
+                -DCMAKE_CXX_COMPILER=clang++ \
+                -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
-        cmake --build build --parallel
-        zip -j linux-armv7.zip build/vaultguard build/recover_key
-      '
+              cmake --build build --parallel
+              zip -j linux-armv7.zip build/vaultguard build/recover_key
+            '
 
-    ls -lah linux-armv7.zip
+          ls -lah linux-armv7.zip
 
       # ---------------------------
       # Configure
