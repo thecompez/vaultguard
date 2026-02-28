@@ -211,51 +211,70 @@ jobs:
           $z = Get-Command 7z.exe -ErrorAction SilentlyContinue
           if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
 
-      # ---------------------------
-      # Linux ARMv7 build (container + QEMU)
-      # ---------------------------
+- name: Build + package in ARMv7 container (linux-armv7)
+  if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+  shell: bash
+  run: |
+    set -euo pipefail
 
-    - name: Set up QEMU (linux-armv7)
-      if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
-      uses: docker/setup-qemu-action@v3
-      with:
-        platforms: arm
-
-    - name: Build + package in ARMv7 container (linux-armv7) [clang]
-      if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
-      shell: bash
-      run: |
+    docker run --rm --platform linux/arm/v7 \
+      -e CMAKE_VERSION='${{ env.CMAKE_VERSION }}' \
+      -v "$PWD:/src" -w /src \
+      arm32v7/ubuntu:24.04 bash -lc '
         set -euo pipefail
 
-        docker run --rm --platform linux/arm/v7 \
-          -v "$PWD:/src" -w /src \
-          arm32v7/ubuntu:24.04 bash -lc '
-            set -euo pipefail
-            export DEBIAN_FRONTEND=noninteractive
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          ca-certificates curl git zip ninja-build \
+          clang lld \
+          libsodium-dev \
+          build-essential
 
-            apt-get update
-            apt-get install -y --no-install-recommends \
-              ca-certificates curl git zip \
-              ninja-build cmake \
-              clang lld \
-              libsodium-dev
+        # ---- pinned CMake (best-effort), fallback to apt cmake ----
+        ver="${CMAKE_VERSION}"
+        tmp="/tmp/cmake"
+        mkdir -p "$tmp"
 
-            # Force clang toolchain
-            export CC=clang
-            export CXX=clang++
+        # Kitware naming for armv7 varies by release; try a few common variants.
+        # If none exist, just use apt cmake.
+        try_urls=(
+          "https://github.com/Kitware/CMake/releases/download/v${ver}/cmake-${ver}-linux-armv7l.tar.gz"
+          "https://github.com/Kitware/CMake/releases/download/v${ver}/cmake-${ver}-linux-armv7.tar.gz"
+          "https://github.com/Kitware/CMake/releases/download/v${ver}/cmake-${ver}-linux-armhf.tar.gz"
+        )
 
-            cmake -S . -B build -G Ninja \
-              -DCMAKE_BUILD_TYPE=Release \
-              -DBUILD_TESTING=OFF \
-              -DCMAKE_C_COMPILER="${CC}" \
-              -DCMAKE_CXX_COMPILER="${CXX}" \
-              -DCMAKE_CXX_SCAN_FOR_MODULES=ON
+        installed_cmake=0
+        for url in "${try_urls[@]}"; do
+          echo "Trying CMake: $url"
+          if curl -fsSL "$url" -o /tmp/cmake.tgz; then
+            tar -xzf /tmp/cmake.tgz -C "$tmp" --strip-components=1
+            export PATH="$tmp/bin:$PATH"
+            installed_cmake=1
+            break
+          fi
+        done
 
-            cmake --build build --parallel
-            zip -j linux-armv7.zip build/vaultguard build/recover_key
-          '
+        if [ "$installed_cmake" -eq 0 ]; then
+          echo "Pinned CMake tarball not found for armv7; using apt cmake."
+          apt-get install -y --no-install-recommends cmake
+        fi
 
-        ls -lah linux-armv7.zip
+        echo "cmake:  $(cmake --version | head -n 1)"
+        echo "clang:  $(clang++ --version | head -n 1)"
+        echo "ninja:  $(ninja --version || true)"
+
+        cmake -S . -B build -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DBUILD_TESTING=OFF \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_CXX_SCAN_FOR_MODULES=ON
+
+        cmake --build build --parallel
+        zip -j linux-armv7.zip build/vaultguard build/recover_key
+      '
+
+    ls -lah linux-armv7.zip
 
       # ---------------------------
       # Configure
