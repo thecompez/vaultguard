@@ -218,50 +218,22 @@ jobs:
     set -euo pipefail
 
     docker run --rm --platform linux/arm/v7 \
-      -e CMAKE_VERSION='${{ env.CMAKE_VERSION }}' \
       -v "$PWD:/src" -w /src \
       arm32v7/ubuntu:24.04 bash -lc '
         set -euo pipefail
+        export DEBIAN_FRONTEND=noninteractive
 
         apt-get update
         apt-get install -y --no-install-recommends \
-          ca-certificates curl git zip ninja-build \
-          clang lld \
-          libsodium-dev \
-          build-essential
+          ca-certificates curl git ninja-build zip \
+          libsodium-dev cmake \
+          clang lld
 
-        # ---- pinned CMake (best-effort), fallback to apt cmake ----
-        ver="${CMAKE_VERSION}"
-        tmp="/tmp/cmake"
-        mkdir -p "$tmp"
-
-        # Kitware naming for armv7 varies by release; try a few common variants.
-        # If none exist, just use apt cmake.
-        try_urls=(
-          "https://github.com/Kitware/CMake/releases/download/v${ver}/cmake-${ver}-linux-armv7l.tar.gz"
-          "https://github.com/Kitware/CMake/releases/download/v${ver}/cmake-${ver}-linux-armv7.tar.gz"
-          "https://github.com/Kitware/CMake/releases/download/v${ver}/cmake-${ver}-linux-armhf.tar.gz"
-        )
-
-        installed_cmake=0
-        for url in "${try_urls[@]}"; do
-          echo "Trying CMake: $url"
-          if curl -fsSL "$url" -o /tmp/cmake.tgz; then
-            tar -xzf /tmp/cmake.tgz -C "$tmp" --strip-components=1
-            export PATH="$tmp/bin:$PATH"
-            installed_cmake=1
-            break
-          fi
-        done
-
-        if [ "$installed_cmake" -eq 0 ]; then
-          echo "Pinned CMake tarball not found for armv7; using apt cmake."
-          apt-get install -y --no-install-recommends cmake
-        fi
-
-        echo "cmake:  $(cmake --version | head -n 1)"
-        echo "clang:  $(clang++ --version | head -n 1)"
-        echo "ninja:  $(ninja --version || true)"
+        # Make sure we are actually using clang (parity with linux-x86/linux-x64)
+        clang --version | head -n 1
+        clang++ --version | head -n 1
+        cmake --version | head -n 1
+        ninja --version || true
 
         cmake -S . -B build -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
