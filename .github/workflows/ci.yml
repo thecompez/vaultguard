@@ -214,8 +214,35 @@ jobs:
       # Linux ARMv7 build (container + QEMU)
       # ---------------------------
 
+      # ---------------------------
+      # Linux ARMv7 build (container + QEMU)
+      # ---------------------------
+
+      - name: Set up QEMU (linux-armv7)
+        if: matrix.name == 'linux-armv7'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      # Extra hardening: re-install binfmt (prevents flaky "exec format error")
+      - name: Force register binfmt (linux-armv7)
+        if: matrix.name == 'linux-armv7'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --privileged tonistiigi/binfmt:latest --install arm
+          docker run --rm --privileged tonistiigi/binfmt:latest --version
+
+      # Sanity check using the SAME target image (this catches the exact failure)
+      - name: Sanity check QEMU with Ubuntu armv7 (linux-armv7)
+        if: matrix.name == 'linux-armv7'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/arm/v7 arm32v7/ubuntu:24.04 uname -m
+
       - name: Build + package in ARMv7 container (linux-armv7)
-        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        if: matrix.name == 'linux-armv7'
         shell: bash
         run: |
           set -euo pipefail
@@ -256,7 +283,6 @@ jobs:
             '
 
           ls -lah linux-armv7.zip
-
       # ---------------------------
       # Configure
       # ---------------------------
