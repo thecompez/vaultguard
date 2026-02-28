@@ -29,6 +29,7 @@ jobs:
             name: windows-arm64
             vcpkg_triplet: arm64-windows
             vs_arch: ARM64
+
           - os: windows-latest
             name: windows-x86
             vcpkg_triplet: x86-windows
@@ -211,14 +212,14 @@ jobs:
           if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
 
       # ---------------------------
-      # Linux ARMv7 build (container + QEMU) [clang]
+      # Linux ARMv7 build (container + QEMU)
       # ---------------------------
 
-      - name: Set up QEMU (linux-armv7)
-        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm
+    - name: Set up QEMU (linux-armv7)
+      if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+      uses: docker/setup-qemu-action@v3
+      with:
+        platforms: arm
 
     - name: Build + package in ARMv7 container (linux-armv7) [clang]
       if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
@@ -237,23 +238,17 @@ jobs:
               ca-certificates curl git zip \
               ninja-build cmake \
               clang lld \
-              clang-tools \
               libsodium-dev
 
+            # Force clang toolchain
             export CC=clang
             export CXX=clang++
-
-            SCAN_DEPS="$(command -v clang-scan-deps || true)"
-            if [ -z "$SCAN_DEPS" ]; then
-              echo "ERROR: clang-scan-deps not found (install clang-tools / clang-tools-18)"; exit 1
-            fi
 
             cmake -S . -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=Release \
               -DBUILD_TESTING=OFF \
               -DCMAKE_C_COMPILER="${CC}" \
               -DCMAKE_CXX_COMPILER="${CXX}" \
-              -DCMAKE_CXX_COMPILER_CLANG_SCAN_DEPS="${SCAN_DEPS}" \
               -DCMAKE_CXX_SCAN_FOR_MODULES=ON
 
             cmake --build build --parallel
