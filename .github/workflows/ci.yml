@@ -29,7 +29,6 @@ jobs:
             name: windows-arm64
             vcpkg_triplet: arm64-windows
             vs_arch: ARM64
-
           - os: windows-latest
             name: windows-x86
             vcpkg_triplet: x86-windows
@@ -211,6 +210,23 @@ jobs:
           $z = Get-Command 7z.exe -ErrorAction SilentlyContinue
           if ($z) { cmd /c "7z" | Select-String "7-Zip" | Select-Object -First 1 | Out-Host }
 
+      # ---------------------------
+      # Linux ARMv7 build (container + QEMU)
+      # ---------------------------
+
+      - name: Set up QEMU (linux-armv7)
+        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: Sanity check QEMU (linux-armv7)
+        if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --platform linux/arm/v7 alpine:3.19 uname -m
+
       - name: Build + package in ARMv7 container (linux-armv7)
         if: runner.os == 'Linux' && matrix.name == 'linux-armv7'
         shell: bash
@@ -229,7 +245,6 @@ jobs:
                 libsodium-dev cmake \
                 clang lld
 
-              # Make sure we are actually using clang (parity with linux-x86/linux-x64)
               clang --version | head -n 1
               clang++ --version | head -n 1
               cmake --version | head -n 1
