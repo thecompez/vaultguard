@@ -2,6 +2,11 @@
 
 Secure Wallet Storage and Recovery Tool
 
+[![C++23](https://img.shields.io/badge/C%2B%2B-23-blue?style=flat-square&logo=cplusplus)](https://en.cppreference.com/w/cpp/17)
+[![CMake](https://img.shields.io/badge/CMake-4.1.2%2B-blue?style=flat-square&logo=cmake)](https://cmake.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)](CONTRIBUTING.md)
+
 ## Overview
 
 VaultGuard is a C++26 application for securely storing and recovering cryptocurrency wallets (private keys and seed phrases) on an encrypted USB drive. It leverages libsodium for strong cryptography, simulates a blockchain-like structure for redundancy, and supports cross-platform USB management.
